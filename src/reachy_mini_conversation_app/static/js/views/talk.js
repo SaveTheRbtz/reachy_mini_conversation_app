@@ -1,11 +1,11 @@
 /**
- * Talk view: conversation orb driven by the SSE activity stream.
+ * Talk view: conversation orb driven by the RPC activity stream.
  * Audio I/O runs entirely in Python; the orb doubles as the mic toggle.
  * Robot stays live, tapping the orb only mutes or unmutes the user's mic.
  */
 
 import { applyPersonality, getMicState, listPersonalities, setMicMuted, subscribe } from "../api.js";
-import { BUILT_IN_DEFAULT_OPTION, ORB_STATES } from "../constants.js";
+import { ORB_STATES } from "../constants.js";
 import { createOrb, mapActivityToState } from "../orb.js";
 import { consumePendingApply } from "../pending-apply.js";
 import { setPersonality } from "../personality-badge.js";
@@ -23,12 +23,21 @@ const CAPTION_BY_STATE = Object.freeze({
 
 export async function mountTalkView({ outlet, signal }) {
   const pending = consumePendingApply();
-  const micStatePromise = getMicState();
-  let muted = true;
+  const micStatePromise = getMicState().catch((error) => {
+    console.warn("Failed to load microphone state", error);
+    return null;
+  });
+  let muted = false;
+  let micReady = false;
   let togglePending = false;
   let activePersonality = null;
+  let subscription = null;
 
-  const caption = h("p", { class: "talk__caption" }, CAPTION_BY_STATE[ORB_STATES.CONNECTING]);
+  const caption = h(
+    "p",
+    { class: "talk__caption", role: "status", "aria-live": "polite" },
+    CAPTION_BY_STATE[ORB_STATES.CONNECTING]
+  );
   const defaultAction = document.querySelector('[data-component="default-personality-action"]');
   if (defaultAction) {
     defaultAction.hidden = true;
@@ -40,8 +49,11 @@ export async function mountTalkView({ outlet, signal }) {
       caption.textContent = CAPTION_BY_STATE[state] || "";
     },
   });
+  orb.root.disabled = true;
   orb.root.addEventListener("click", onMicTap);
   syncMicAria();
+
+  signal.addEventListener("abort", cleanup, { once: true });
 
   const view = h(
     "section",
@@ -62,7 +74,7 @@ export async function mountTalkView({ outlet, signal }) {
       return;
     }
     if (signal.aborted) return;
-    // SSE "ready" will flip the orb to its resting state next tick.
+    // The activity subscription will flip the orb to its resting state next tick.
     caption.textContent = CAPTION_BY_STATE[ORB_STATES.CONNECTING];
     void refreshPersonalityState();
   } else {
@@ -70,19 +82,16 @@ export async function mountTalkView({ outlet, signal }) {
     void refreshPersonalityState();
   }
 
-  try {
-    muted = Boolean((await micStatePromise)?.muted);
-  } catch {
-    // keep the muted default
-  }
+  const micState = await micStatePromise;
+  if (micState) muted = Boolean(micState.muted);
   if (signal.aborted) return;
+  micReady = true;
+  orb.root.disabled = false;
   syncMicAria();
 
-  let everConnected = false;
-  const subscription = subscribeConversationEvents({
-    // Re-sync mic state on (re)connect: another tab may have toggled it.
+  subscription = subscribeConversationEvents({
+    // Re-sync mic state after subscribing: another tab may have toggled it.
     onReady: async () => {
-      everConnected = true;
       if (!togglePending) {
         try {
           muted = Boolean((await getMicState())?.muted);
@@ -101,28 +110,23 @@ export async function mountTalkView({ outlet, signal }) {
       if (next == null) return;
       orb.setState(next);
     },
-    onError: () => {
-      // SSE auto-retries (e.g. 404 before routes exist), so a failure here is transient.
-      orb.setState(ORB_STATES.CONNECTING);
-      caption.textContent = everConnected ? "Reconnecting..." : CAPTION_BY_STATE[ORB_STATES.CONNECTING];
-    },
   });
 
-  signal.addEventListener("abort", () => {
-    subscription.close();
+  function cleanup() {
+    subscription?.close();
     orb.dispose();
     if (defaultAction) {
       defaultAction.hidden = true;
       defaultAction.removeEventListener("click", onSetDefault);
     }
-  });
+  }
 
   function restingState() {
     return muted ? ORB_STATES.MUTED : ORB_STATES.IDLE;
   }
 
   async function onMicTap() {
-    if (togglePending) return;
+    if (!micReady || togglePending) return;
     togglePending = true;
     try {
       const data = await setMicMuted(!muted);
@@ -146,7 +150,7 @@ export async function mountTalkView({ outlet, signal }) {
     const personalityState = await fetchPersonalityState();
     if (signal.aborted || personalityState == null) return;
     activePersonality = personalityState.current;
-    setPersonality(personalityState.badgeName);
+    setPersonality(personalityState.current);
     const shouldHide = personalityState.locked || personalityState.current === personalityState.startup;
     if (defaultAction) {
       defaultAction.hidden = shouldHide;
@@ -156,12 +160,12 @@ export async function mountTalkView({ outlet, signal }) {
   async function onSetDefault() {
     if (!defaultAction || !activePersonality) return;
     defaultAction.disabled = true;
-    caption.textContent = `Saving "${displayPersonalityName(activePersonality)}" as default...`;
+    caption.textContent = `Saving "${prettifyProfileName(activePersonality)}" as default...`;
     try {
       await applyPersonality(activePersonality, { persist: true });
       if (signal.aborted) return;
       defaultAction.hidden = true;
-      caption.textContent = `"${displayPersonalityName(activePersonality)}" will be used at startup.`;
+      caption.textContent = `"${prettifyProfileName(activePersonality)}" will be used at startup.`;
     } catch (error) {
       if (!signal.aborted) {
         caption.textContent = `Failed to save default: ${error?.message || error}`;
@@ -172,13 +176,14 @@ export async function mountTalkView({ outlet, signal }) {
   }
 
   function syncMicAria() {
+    if (!micReady) {
+      orb.root.setAttribute("aria-pressed", "false");
+      orb.root.setAttribute("aria-label", "Loading microphone state");
+      return;
+    }
     orb.root.setAttribute("aria-pressed", String(!muted));
     orb.root.setAttribute("aria-label", muted ? "Unmute microphone" : "Mute microphone");
   }
-}
-
-function displayPersonalityName(name) {
-  return name === BUILT_IN_DEFAULT_OPTION ? "Default" : prettifyProfileName(name);
 }
 
 async function fetchPersonalityState() {
@@ -188,9 +193,8 @@ async function fetchPersonalityState() {
     if (!current) return null;
     return {
       current,
-      startup: data?.startup || BUILT_IN_DEFAULT_OPTION,
+      startup: data?.startup || "default",
       locked: Boolean(data?.locked),
-      badgeName: current === BUILT_IN_DEFAULT_OPTION ? "default" : current,
     };
   } catch {
     return null;
@@ -209,8 +213,7 @@ function subscribeConversationEvents({ onActivity, onReady } = {}) {
     if (reason) onActivity(reason);
   });
 
-  // The socket connects lazily; kick off the initial sync (mic/personality)
-  // like the old SSE "ready" event did.
+  // The socket connects lazily, so schedule the initial mic and orb sync.
   if (typeof onReady === "function") Promise.resolve().then(onReady);
 
   return {

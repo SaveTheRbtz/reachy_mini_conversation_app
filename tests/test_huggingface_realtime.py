@@ -452,6 +452,31 @@ async def test_apply_personality_uses_selected_voice_for_lb_allocated_sessions(m
 
 
 @pytest.mark.asyncio
+async def test_apply_personality_restores_profile_when_tools_fail(monkeypatch: Any) -> None:
+    """A failed tool reload should leave the previous profile selected."""
+    selected_profiles: list[str | None] = []
+
+    def select_profile(profile: str | None) -> None:
+        selected_profiles.append(profile)
+        config.REACHY_MINI_CUSTOM_PROFILE = profile
+
+    def fail_tool_reload(*, force: bool = False) -> None:
+        raise RuntimeError("tool reload failed")
+
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "default")
+    monkeypatch.setattr(hf_mod, "set_custom_profile", select_profile)
+    monkeypatch.setattr(hf_mod, "get_session_instructions", lambda _instance_path=None: "new instructions")
+    monkeypatch.setattr(hf_mod.core_tools, "initialize_tools", fail_tool_reload)
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+
+    result = await handler.apply_personality("broken")
+
+    assert result == "Failed to apply personality: tool reload failed"
+    assert config.REACHY_MINI_CUSTOM_PROFILE == "default"
+    assert selected_profiles == ["broken", "default"]
+
+
+@pytest.mark.asyncio
 async def test_change_voice_updates_live_hf_session_without_restart(monkeypatch: Any) -> None:
     """Changing Hugging Face voice should update the active session in place."""
     captured_update: dict[str, Any] = {}

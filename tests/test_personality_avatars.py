@@ -17,7 +17,8 @@ from reachy_mini_conversation_app.avatars import (
     avatar_id_for,
     read_avatar_svg,
 )
-from reachy_mini_conversation_app.personality import DEFAULT_OPTION
+from reachy_mini_conversation_app.personality import save_user_personality
+from reachy_mini_conversation_app.profile_store import DEFAULT_PROFILE_NAME
 from reachy_mini_conversation_app.personality_routes import (
     RouteError,
     PersonalityOps,
@@ -33,7 +34,7 @@ def _ops() -> PersonalityOps:
 def test_avatar_id_maps_builtin_to_slug() -> None:
     """A built-in profile resolves to its shared avatar slug (no .svg suffix)."""
     assert avatar_id_for("mad_scientist_assistant") == "mad-scientist"
-    assert avatar_id_for(DEFAULT_OPTION) == "default"
+    assert avatar_id_for(DEFAULT_PROFILE_NAME) == "default"
 
 
 def test_avatar_id_falls_back_to_default_for_unknown() -> None:
@@ -59,7 +60,7 @@ def test_read_avatar_svg_defaults_for_unknown() -> None:
 def test_profile_local_avatar_takes_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A persona that ships its own avatar.svg wins over the mapping/default."""
     monkeypatch.setattr(config, "INSTANCE_PATH", tmp_path)
-    personality_mod._write_profile("selfie", "Be brief.", "")
+    save_user_personality("selfie", "Be brief.")
     own = tmp_path / "user_personalities" / "selfie" / "avatar.svg"
     own.write_text("<svg id='own'></svg>", encoding="utf-8")
 
@@ -72,7 +73,7 @@ def test_get_all_lists_every_persona_without_inline_svg() -> None:
     result = _ops().get_all()
     personalities = result["personalities"]
 
-    assert personalities[0]["name"] == DEFAULT_OPTION
+    assert personalities[0]["name"] == DEFAULT_PROFILE_NAME
     names = {p["name"] for p in personalities}
     assert "mad_scientist_assistant" in names
     for entry in personalities:

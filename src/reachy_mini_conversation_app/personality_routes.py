@@ -1,59 +1,53 @@
-"""Personality and voice management, exposed over JSON-RPC.
+"""Personality and voice management exposed over JSON-RPC."""
 
-Each operation lives on :class:`PersonalityOps` (transport-agnostic).
-``build_personality_ops`` constructs it and ``register_personality_methods``
-registers the ops as ``personalities.*`` / ``voices.*`` methods on a
-:class:`~reachy_mini.apps.jsonrpc_server.JsonRpcServer`, so the local UI and
-remote WebRTC clients drive personalities through one control surface.
-"""
-
-from __future__ import annotations
 import asyncio
 import logging
-from typing import Any, Callable, Optional, Awaitable, Coroutine
+from typing import Any, TypeVar
+from collections.abc import Callable, Awaitable, Coroutine
 
 from reachy_mini.io.jsonrpc import JsonRpcError
 from reachy_mini.apps.jsonrpc_server import JsonRpcServer
-from .config import (
+from reachy_mini_conversation_app.config import (
     LOCKED_PROFILE,
     config,
     get_default_voice,
     get_available_voices,
 )
-from .avatars import avatar_id_for, read_avatar_svg
-from .personality import (
-    DEFAULT_OPTION,
-    _sanitize_name,
-    _write_profile,
-    read_tools_for,
-    read_greeting_for,
+from reachy_mini_conversation_app.avatars import avatar_id_for, read_avatar_svg
+from reachy_mini_conversation_app.personality import (
     delete_personality,
     list_personalities,
-    available_tools_for,
-    resolve_profile_dir,
-    read_instructions_for,
+    save_user_personality,
+    available_tool_catalog,
 )
-from .conversation_handler import ConversationHandler
+from reachy_mini_conversation_app.profile_store import (
+    DEFAULT_PROFILE_NAME,
+    ProfileFormatError,
+    read_profile,
+    normalize_tool_names,
+    canonical_profile_name,
+)
+from reachy_mini_conversation_app.profile_toolsets import (
+    read_profile_tool_override,
+)
+from reachy_mini_conversation_app.conversation_handler import ConversationHandler
 
 
 logger = logging.getLogger(__name__)
+ResultT = TypeVar("ResultT")
 
 
 class RouteError(Exception):
-    """A domain error carrying a stable ``reason`` and extras.
-
-    Rendered as a JSON-RPC error with ``data.reason == reason`` (and any
-    ``extra`` merged into ``data``).
-    """
+    """Represent a JSON-RPC operation error with a stable reason."""
 
     def __init__(
         self,
         reason: str,
         *,
-        extra: Optional[dict[str, Any]] = None,
-        message: Optional[str] = None,
+        extra: dict[str, Any] | None = None,
+        message: str | None = None,
     ) -> None:
-        """Build the error (``reason`` doubles as the message if none given)."""
+        """Initialize an operation error."""
         super().__init__(message or reason)
         self.reason = reason
         self.extra = extra or {}
@@ -61,21 +55,21 @@ class RouteError(Exception):
 
 
 class PersonalityOps:
-    """Transport-agnostic personality/voice operations (return plain dicts)."""
+    """Provide transport-independent personality and voice operations."""
 
     def __init__(
         self,
         handler: ConversationHandler,
         get_loop: Callable[[], asyncio.AbstractEventLoop | None],
         *,
-        persist_personality: Callable[[Optional[str], Optional[str]], None] | None = None,
-        get_persisted_personality: Callable[[], Optional[str]] | None = None,
-        apply_personality: Callable[[Optional[str]], Awaitable[str]] | None = None,
+        persist_personality: Callable[[str | None, str | None], None] | None = None,
+        get_persisted_personality: Callable[[], str | None] | None = None,
+        apply_personality: Callable[[str | None], Awaitable[str]] | None = None,
         get_voices: Callable[[], Awaitable[list[str]]] | None = None,
         get_current_voice: Callable[[], str] | None = None,
         change_voice: Callable[[str], Awaitable[str]] | None = None,
     ) -> None:
-        """Capture the handler and the LocalStream callbacks the ops delegate to."""
+        """Initialize operations with runtime callbacks."""
         self._handler = handler
         self._get_loop = get_loop
         self._persist_personality = persist_personality
@@ -84,262 +78,315 @@ class PersonalityOps:
         self._get_voices = get_voices
         self._get_current_voice = get_current_voice
         self._change_voice = change_voice
-        self._startup_choice: Any = self._configured_startup_choice()
+        self._startup_choice = self._configured_startup_choice()
 
-    # -- startup/current choice helpers -----------------------------------
-
-    def _configured_startup_choice(self) -> Any:
+    def _configured_startup_choice(self) -> str:
         try:
             if self._get_persisted_personality is not None:
-                stored = self._get_persisted_personality()
-                if stored:
-                    return stored
-            env_val = getattr(config, "REACHY_MINI_CUSTOM_PROFILE", None)
-            if env_val:
-                return env_val
-        except Exception as e:
-            logger.warning("Failed to read configured startup personality: %s", e)
-        return DEFAULT_OPTION
+                persisted = self._get_persisted_personality()
+                if persisted:
+                    return canonical_profile_name(persisted)
+            return canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
+        except Exception as exc:
+            logger.warning("Failed to read configured startup personality: %s", exc)
+            return DEFAULT_PROFILE_NAME
 
-    def _startup_choice_value(self) -> Any:
+    def _startup_choice_value(self) -> str:
         try:
             if self._get_persisted_personality is not None:
-                stored = self._get_persisted_personality()
-                if stored:
-                    return stored
-        except Exception as e:
-            logger.warning("Failed to read persisted startup personality: %s", e)
+                persisted = self._get_persisted_personality()
+                if persisted:
+                    return canonical_profile_name(persisted)
+        except Exception as exc:
+            logger.warning("Failed to read persisted startup personality: %s", exc)
         return self._startup_choice
 
     def _set_startup_choice(self, selected_name: str) -> None:
-        self._startup_choice = DEFAULT_OPTION if selected_name == DEFAULT_OPTION else selected_name
+        self._startup_choice = canonical_profile_name(selected_name)
 
     def _current_choice(self) -> str:
+        return canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
+
+    def _voice_override(self) -> str | None:
         try:
-            cur = getattr(config, "REACHY_MINI_CUSTOM_PROFILE", None)
-            return cur or DEFAULT_OPTION
-        except Exception:
-            return DEFAULT_OPTION
+            callback = self._get_current_voice or self._handler.get_current_voice
+            return callback()
+        except Exception as exc:
+            logger.warning("Failed to read current voice override: %s", exc)
+            return None
 
-    def _voice_override(self) -> Optional[str]:
-        cb = self._get_current_voice or getattr(self._handler, "get_current_voice", None)
-        return cb() if callable(cb) else None
-
-    async def _run_on_loop(self, coro: Coroutine[Any, Any, Any], timeout: float = 10.0) -> Any:
-        """Await a coroutine on the LocalStream loop without blocking the caller."""
+    async def _run_on_loop(
+        self,
+        coroutine: Coroutine[Any, Any, ResultT],
+        timeout: float = 10.0,
+    ) -> ResultT:
         loop = self._get_loop()
         if loop is None:
+            coroutine.close()
             raise RouteError("loop_unavailable")
-        fut = asyncio.run_coroutine_threadsafe(coro, loop)
-        return await asyncio.wait_for(asyncio.wrap_future(fut), timeout=timeout)
-
-    # -- operations --------------------------------------------------------
+        future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
 
     def get_choices(self) -> dict[str, Any]:
-        """List personalities plus current/startup selection and lock state."""
+        """List personalities and the current startup state."""
         return {
-            "choices": [DEFAULT_OPTION, *list_personalities()],
+            "choices": list_personalities(),
             "current": self._current_choice(),
             "startup": self._startup_choice_value(),
             "locked": LOCKED_PROFILE is not None,
             "locked_to": LOCKED_PROFILE,
+        }
+
+    def _load_profile(self, name: str, available_tools: list[str]) -> dict[str, Any]:
+        try:
+            profile = read_profile(name)
+        except (FileNotFoundError, ProfileFormatError) as exc:
+            logger.warning("Failed to load profile %r: %s", name, exc)
+            raise RouteError("profile_unavailable", message=str(exc)) from exc
+        try:
+            override = read_profile_tool_override(name, config.INSTANCE_PATH)
+        except (OSError, RuntimeError) as exc:
+            logger.warning("Failed to load tools for profile %r: %s", name, exc)
+            raise RouteError("profile_tools_unavailable", message=str(exc)) from exc
+        enabled_tools = list(override) if override is not None else list(profile.default_tools)
+        return {
+            "instructions": profile.instructions,
+            "greeting": profile.greeting or "",
+            "tools_text": "".join(f"{tool_name}\n" for tool_name in enabled_tools),
+            "voice": profile.voice or get_default_voice(),
+            "uses_default_voice": profile.voice is None,
+            "available_tools": available_tools,
+            "enabled_tools": enabled_tools,
         }
 
     def load(self, name: str) -> dict[str, Any]:
-        """Return one personality's instructions, greeting, tools, and voice."""
-        instr = read_instructions_for(name)
-        tools_txt = read_tools_for(name)
-        greeting = read_greeting_for(name)
-        voice = get_default_voice()
-        uses_default_voice = True
-        if name != DEFAULT_OPTION:
-            vf = resolve_profile_dir(name) / "voice.txt"
-            if vf.exists():
-                v = vf.read_text(encoding="utf-8").strip()
-                voice = v or get_default_voice()
-                uses_default_voice = not bool(v)
-        enabled = [ln.strip() for ln in tools_txt.splitlines() if ln.strip() and not ln.strip().startswith("#")]
-        return {
-            "instructions": instr,
-            "greeting": greeting,
-            "tools_text": tools_txt,
-            "voice": voice,
-            "uses_default_voice": uses_default_voice,
-            "available_tools": available_tools_for(name),
-            "enabled_tools": enabled,
-        }
+        """Load the full configuration for one personality."""
+        available_tools = [tool["id"] for tool in available_tool_catalog()]
+        return self._load_profile(name, available_tools)
 
     def get_all(self) -> dict[str, Any]:
-        """Return every personality with its full config in a single call."""
-        # No inline SVG: an avatar can be 100+ KB; clients fetch them lazily via
-        # personalities.avatar and cache by avatar_id.
-        items: list[dict[str, Any]] = []
-        for selection in [DEFAULT_OPTION, *list_personalities()]:
-            entry = self.load(selection)
-            entry["name"] = selection
-            entry["avatar_id"] = avatar_id_for(selection)
-            items.append(entry)
+        """Load every personality without embedding avatar markup."""
+        personalities: list[dict[str, Any]] = []
+        available_tools = [tool["id"] for tool in available_tool_catalog()]
+        for name in list_personalities():
+            entry = self._load_profile(name, available_tools)
+            entry["name"] = name
+            entry["avatar_id"] = avatar_id_for(name)
+            personalities.append(entry)
         return {
-            "personalities": items,
+            "personalities": personalities,
             "current": self._current_choice(),
             "startup": self._startup_choice_value(),
             "locked": LOCKED_PROFILE is not None,
             "locked_to": LOCKED_PROFILE,
         }
 
-    def avatar(self, name: str) -> dict[str, Any]:
-        """Return the SVG markup for a personality (falls back to the default)."""
+    def avatar(self, name: str) -> dict[str, str]:
+        """Load an avatar, falling back to the packaged default."""
         svg = read_avatar_svg(name)
         if svg is None:
             raise RouteError("avatar_unavailable")
         return {"name": name, "avatar_id": avatar_id_for(name), "svg": svg}
 
-    def save(self, raw: dict[str, Any]) -> dict[str, Any]:
-        """Create or update a user personality from a raw payload dict."""
-        name = str(raw.get("name", ""))
-        instructions = str(raw.get("instructions", ""))
-        greeting = str(raw["greeting"]) if raw.get("greeting") is not None else None
-        tools_text = str(raw.get("tools_text", ""))
-        voice = str(raw.get("voice", get_default_voice())) if raw.get("voice") is not None else get_default_voice()
-        sanitized_name = _sanitize_name(name)
-        if not sanitized_name:
-            raise RouteError("invalid_name")
-        try:
-            _write_profile(sanitized_name, instructions, tools_text, voice or get_default_voice(), greeting)
-        except Exception as e:
-            raise RouteError(str(e)) from e
-        return {
-            "ok": True,
-            "value": f"user_personalities/{sanitized_name}",
-            "choices": [DEFAULT_OPTION, *list_personalities()],
-        }
-
-    def delete(self, name: str) -> dict[str, Any]:
-        """Delete a user personality (never the active/startup or a built-in one)."""
-        choices = [DEFAULT_OPTION, *list_personalities()]
-        if name in (self._current_choice(), self._startup_choice_value()):
-            raise RouteError("profile_in_use", extra={"choices": choices})
-        if not delete_personality(name):
-            raise RouteError("not_deletable", extra={"choices": choices})
-        return {"ok": True, "choices": [DEFAULT_OPTION, *list_personalities()]}
-
-    async def apply(self, name: str, persist: bool = False) -> dict[str, Any]:
-        """Apply a personality (optionally persisting it as the startup choice)."""
+    def save(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create or update a user personality."""
         if LOCKED_PROFILE is not None:
             raise RouteError("profile_locked", extra={"locked_to": LOCKED_PROFILE})
-        selected_name = name or DEFAULT_OPTION
+
+        name = str(payload.get("name", ""))
+        instructions = str(payload.get("instructions", ""))
+        if not instructions.strip():
+            raise RouteError("invalid_instructions")
+        voice = str(payload["voice"]) if payload.get("voice") is not None else None
+        greeting = str(payload["greeting"]) if payload.get("greeting") is not None else None
+        has_tools_text = "tools_text" in payload
+        default_tools = (
+            normalize_tool_names(str(payload.get("tools_text") or "").splitlines()) if has_tools_text else None
+        )
+        overwrite = bool(payload.get("overwrite", has_tools_text))
+        try:
+            value = save_user_personality(
+                name,
+                instructions,
+                voice,
+                greeting,
+                overwrite=overwrite,
+                default_tools=default_tools,
+            )
+        except FileExistsError as exc:
+            raise RouteError("profile_exists") from exc
+        except ProfileFormatError as exc:
+            logger.warning("Failed to edit profile %r: %s", name, exc)
+            raise RouteError("profile_unavailable", message=str(exc)) from exc
+        except ValueError as exc:
+            raise RouteError("invalid_name", message=str(exc)) from exc
+        except (OSError, RuntimeError) as exc:
+            logger.exception("Failed to save personality %r", name)
+            raise RouteError("profile_save_failed", message=str(exc)) from exc
+        return {"ok": True, "value": value, "choices": list_personalities()}
+
+    def delete(self, name: str) -> dict[str, Any]:
+        """Delete an inactive user personality."""
+        choices = list_personalities()
+        if LOCKED_PROFILE is not None:
+            raise RouteError("profile_locked", extra={"locked_to": LOCKED_PROFILE})
+        profile_name = canonical_profile_name(name)
+        if profile_name in (self._current_choice(), self._startup_choice_value()):
+            raise RouteError("profile_in_use", extra={"choices": choices})
+        try:
+            deleted = delete_personality(profile_name)
+        except OSError as exc:
+            logger.exception("Failed to delete personality %r", profile_name)
+            raise RouteError("profile_delete_failed", message=str(exc)) from exc
+        if not deleted:
+            raise RouteError("not_deletable", extra={"choices": choices})
+        return {"ok": True, "choices": list_personalities()}
+
+    async def apply(self, name: str, persist: bool = False, *, force: bool = False) -> dict[str, Any]:
+        """Apply or reload a personality and optionally persist it for startup."""
+        if LOCKED_PROFILE is not None:
+            raise RouteError("profile_locked", extra={"locked_to": LOCKED_PROFILE})
+        selected_name = canonical_profile_name(name)
         persisted_choice = self._startup_choice_value()
 
-        def _persist_if_asked() -> Any:
+        def _persist_if_requested() -> None:
             nonlocal persisted_choice
-            if persist and self._persist_personality is not None:
-                try:
-                    self._persist_personality(
-                        None if selected_name == DEFAULT_OPTION else selected_name,
-                        self._voice_override(),
-                    )
-                    self._set_startup_choice(selected_name)
-                    persisted_choice = self._startup_choice_value()
-                except Exception as e:
-                    logger.warning("Failed to persist startup personality: %s", e)
+            if not persist or self._persist_personality is None:
+                return
+            try:
+                self._persist_personality(
+                    None if selected_name == DEFAULT_PROFILE_NAME else selected_name,
+                    self._voice_override(),
+                )
+                self._set_startup_choice(selected_name)
+                persisted_choice = self._startup_choice_value()
+            except Exception as exc:
+                logger.warning("Failed to persist startup personality: %s", exc)
 
-        if selected_name == self._current_choice():
-            _persist_if_asked()
+        if selected_name == self._current_choice() and not force:
+            _persist_if_requested()
             return {"ok": True, "status": "Personality unchanged.", "startup": persisted_choice}
 
-        async def _do_apply() -> str:
-            profile = None if selected_name == DEFAULT_OPTION else selected_name
+        async def _apply() -> str:
+            profile = None if selected_name == DEFAULT_PROFILE_NAME else selected_name
             if self._apply_personality is not None:
                 return await self._apply_personality(profile)
             return await self._handler.apply_personality(profile)
 
         try:
-            status = await self._run_on_loop(_do_apply())
+            status = await self._run_on_loop(_apply())
         except RouteError:
             raise
-        except Exception as e:
-            raise RouteError(str(e)) from e
-        _persist_if_asked()
+        except Exception as exc:
+            raise RouteError("profile_apply_failed", message=str(exc)) from exc
+        _persist_if_requested()
         return {"ok": True, "status": status, "startup": persisted_choice}
 
     async def voices(self) -> list[str]:
-        """Return the voices available for the active backend."""
+        """List voices available for the active backend."""
         if self._get_loop() is None:
-            return get_available_voices()  # no session loop yet; use the static catalog
+            return get_available_voices()
+
+        async def _get_available() -> list[str]:
+            if self._get_voices is not None:
+                return await self._get_voices()
+            return await self._handler.get_available_voices()
+
         try:
-
-            async def _get_v() -> list[str]:
-                if self._get_voices is not None:
-                    return await self._get_voices()
-                return await self._handler.get_available_voices()
-
-            return list(await self._run_on_loop(_get_v()))
-        except Exception:
+            return await self._run_on_loop(_get_available())
+        except Exception as exc:
+            logger.warning("Failed to read available voices: %s", exc)
             return get_available_voices()
 
     def current_voice(self) -> dict[str, str]:
         """Return the current voice."""
         try:
-            if self._get_current_voice is not None:
-                return {"voice": self._get_current_voice()}
-            return {"voice": self._handler.get_current_voice()}
-        except Exception:
+            callback = self._get_current_voice or self._handler.get_current_voice
+            return {"voice": callback()}
+        except Exception as exc:
+            logger.warning("Failed to read current voice: %s", exc)
             return {"voice": get_default_voice()}
 
     async def apply_voice(self, voice: str) -> dict[str, Any]:
-        """Change the current voice live (no backend rebuild)."""
-        voice = str(voice or "")
-        if not voice:
+        """Change the current voice without rebuilding the backend."""
+        selected_voice = voice.strip()
+        if not selected_voice:
             raise RouteError("missing_voice")
 
-        async def _do() -> str:
+        async def _apply() -> str:
             if self._change_voice is not None:
-                return await self._change_voice(voice)
-            return await self._handler.change_voice(voice)
+                return await self._change_voice(selected_voice)
+            return await self._handler.change_voice(selected_voice)
 
         try:
-            status = await self._run_on_loop(_do())
+            status = await self._run_on_loop(_apply())
         except RouteError:
             raise
-        except Exception as e:
-            raise RouteError(str(e)) from e
+        except Exception as exc:
+            raise RouteError("voice_apply_failed", message=str(exc)) from exc
         return {"ok": True, "status": status}
 
 
 def build_personality_ops(
     handler: ConversationHandler,
     get_loop: Callable[[], asyncio.AbstractEventLoop | None],
-    **kwargs: Any,
+    *,
+    persist_personality: Callable[[str | None, str | None], None] | None = None,
+    get_persisted_personality: Callable[[], str | None] | None = None,
+    apply_personality: Callable[[str | None], Awaitable[str]] | None = None,
+    get_voices: Callable[[], Awaitable[list[str]]] | None = None,
+    get_current_voice: Callable[[], str] | None = None,
+    change_voice: Callable[[str], Awaitable[str]] | None = None,
 ) -> PersonalityOps:
-    """Build the shared personality/voice ops (register them with a transport)."""
-    return PersonalityOps(handler, get_loop, **kwargs)
+    """Build personality operations for a control transport."""
+    return PersonalityOps(
+        handler,
+        get_loop,
+        persist_personality=persist_personality,
+        get_persisted_personality=get_persisted_personality,
+        apply_personality=apply_personality,
+        get_voices=get_voices,
+        get_current_voice=get_current_voice,
+        change_voice=change_voice,
+    )
 
 
 def register_personality_methods(rpc: JsonRpcServer, ops: PersonalityOps) -> None:
-    """Register the same personality/voice ops as JSON-RPC methods."""
+    """Register personality and voice operations as JSON-RPC methods."""
 
-    def _wrap(fn: Callable[..., Any]) -> Callable[[dict[str, Any]], Any]:
+    def _wrap(operation: Callable[[dict[str, Any]], Any]) -> Callable[[dict[str, Any]], Any]:
         async def _method(params: dict[str, Any]) -> Any:
             try:
-                result = fn(params)
+                result = operation(params)
                 if asyncio.iscoroutine(result):
                     result = await result
                 return result
-            except RouteError as e:
-                raise JsonRpcError(e.message, reason=e.reason, data=e.extra, code=-32000) from e
+            except RouteError as exc:
+                raise JsonRpcError(
+                    exc.message,
+                    reason=exc.reason,
+                    data=exc.extra,
+                    code=-32000,
+                ) from exc
 
         return _method
 
-    rpc.register("personalities.list", _wrap(lambda p: ops.get_choices()))
-    rpc.register("personalities.all", _wrap(lambda p: ops.get_all()))
-    rpc.register("personalities.load", _wrap(lambda p: ops.load(str(p["name"]))))
-    rpc.register("personalities.avatar", _wrap(lambda p: ops.avatar(str(p["name"]))))
-    rpc.register("personalities.save", _wrap(lambda p: ops.save(p)))
-    rpc.register("personalities.delete", _wrap(lambda p: ops.delete(str(p["name"]))))
+    rpc.register("personalities.list", _wrap(lambda params: ops.get_choices()))
+    rpc.register("personalities.all", _wrap(lambda params: ops.get_all()))
+    rpc.register("personalities.load", _wrap(lambda params: ops.load(str(params["name"]))))
+    rpc.register("personalities.avatar", _wrap(lambda params: ops.avatar(str(params["name"]))))
+    rpc.register("personalities.save", _wrap(ops.save))
+    rpc.register("personalities.delete", _wrap(lambda params: ops.delete(str(params["name"]))))
     rpc.register(
         "personalities.apply",
-        _wrap(lambda p: ops.apply(str(p.get("name", "")), bool(p.get("persist", False)))),
+        _wrap(
+            lambda params: ops.apply(
+                str(params.get("name", "")),
+                bool(params.get("persist", False)),
+                force=bool(params.get("force", False)),
+            )
+        ),
     )
-    rpc.register("voices.list", _wrap(lambda p: ops.voices()))
-    rpc.register("voices.current", _wrap(lambda p: ops.current_voice()))
-    rpc.register("voices.apply", _wrap(lambda p: ops.apply_voice(str(p.get("voice", "")))))
+    rpc.register("voices.list", _wrap(lambda params: ops.voices()))
+    rpc.register("voices.current", _wrap(lambda params: ops.current_voice()))
+    rpc.register("voices.apply", _wrap(lambda params: ops.apply_voice(str(params.get("voice", "")))))

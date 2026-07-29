@@ -31,6 +31,7 @@ from reachy_mini_conversation_app.config import (
     HF_LOCAL_CONNECTION_MODE,
     config,
     get_default_voice,
+    set_custom_profile,
     get_available_voices,
     get_hf_direct_ws_url,
     parse_hf_realtime_url,
@@ -291,68 +292,47 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         return self._resolve_backend_voice(voice, source="session voice", fallback=default_voice) or default_voice
 
     async def apply_personality(self, profile: str | None) -> str:
-        """Apply a new personality (profile) at runtime if possible.
-
-        - Updates the global config's selected profile for subsequent calls.
-        - If a realtime connection is active, sends a session.update with the
-          freshly resolved instructions so the change takes effect immediately.
-
-        Returns a short status message for UI feedback.
-        """
+        """Apply a personality to the active or next realtime connection."""
+        previous_profile = config.REACHY_MINI_CUSTOM_PROFILE
+        set_custom_profile(profile)
         try:
-            # Update the in-process config value and env
-            from reachy_mini_conversation_app.config import config as _config
-            from reachy_mini_conversation_app.config import set_custom_profile
-
-            set_custom_profile(profile)
-            logger.info(
-                "Set custom profile to %r (config=%r)", profile, getattr(_config, "REACHY_MINI_CUSTOM_PROFILE", None)
-            )
-
-            try:
-                instructions = get_session_instructions(self.instance_path)
-                voice = self.get_current_voice()
-            except Exception as e:
-                logger.error("Failed to resolve personality content: %s", e)
-                return f"Failed to apply personality: {e}"
-
-            # Rebuild the tool registry
+            instructions = get_session_instructions(self.instance_path)
+            voice = self.get_current_voice()
             core_tools.initialize_tools(force=True)
+        except Exception as exc:
+            set_custom_profile(previous_profile)
+            logger.error("Failed to resolve personality %r: %s", profile, exc)
+            return f"Failed to apply personality: {exc}"
 
-            # Attempt a live update first, then force a full restart to ensure it sticks
-            if self.connection is not None:
-                try:
-                    await self.connection.session.update(
-                        session=RealtimeSessionCreateRequestParam(
-                            type="realtime",
-                            instructions=instructions,
-                            audio=RealtimeAudioConfigParam(
-                                output=RealtimeAudioConfigOutputParam(
-                                    voice=voice,
-                                ),
+        if self.connection is not None:
+            try:
+                await self.connection.session.update(
+                    session=RealtimeSessionCreateRequestParam(
+                        type="realtime",
+                        instructions=instructions,
+                        audio=RealtimeAudioConfigParam(
+                            output=RealtimeAudioConfigOutputParam(
+                                voice=voice,
                             ),
                         ),
-                    )
-                    logger.info("Applied personality via live update: %s", profile or "built-in default")
-                except Exception as e:
-                    logger.warning("Live update failed; will restart session: %s", e)
-
-                # Force a real restart to guarantee the new instructions/voice
-                try:
-                    await self._restart_session()
-                    return "Applied personality and restarted realtime session."
-                except Exception as e:
-                    logger.warning("Failed to restart session after apply: %s", e)
-                    return "Applied personality. Will take effect on next connection."
-            else:
-                logger.info(
-                    "Applied personality recorded: %s (no live connection; will apply on next session)",
-                    profile or "built-in default",
+                    ),
                 )
+                logger.info("Applied personality via live update: %s", profile or "default")
+            except Exception as exc:
+                logger.warning("Live update failed; will restart session: %s", exc)
+
+            try:
+                await self._restart_session()
+                return "Applied personality and restarted realtime session."
+            except Exception as exc:
+                logger.warning("Failed to restart session after apply: %s", exc)
                 return "Applied personality. Will take effect on next connection."
-        except Exception as e:
-            logger.error("Error applying personality '%s': %s", profile, e)
-            return f"Failed to apply personality: {e}"
+
+        logger.info(
+            "Applied personality recorded: %s (no live connection; will apply on next session)",
+            profile or "default",
+        )
+        return "Applied personality. Will take effect on next connection."
 
     async def _emit_debounced_partial(self, transcript: str, item_id: str, sequence_counter: int) -> None:
         """Emit partial transcript after debounce delay."""
@@ -700,7 +680,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             if isinstance(completed_tool.id, str):
                 self._in_flight_tool_calls.discard(completed_tool.id)
 
-            tool = core_tools.ALL_TOOLS.get(completed_tool.tool_name)
+            tool = core_tools.get_tools().get(completed_tool.tool_name)
             # Always surface errors, skip the spoken follow-up for tools that opt out.
             if model_result_submitted and (completed_tool.error is not None or tool is None or tool.needs_response):
                 self._tool_batch_needs_response = True

@@ -12,6 +12,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+import reachy_mini_conversation_app.console as console_mod
 from reachy_mini_conversation_app.config import HF_AVAILABLE_VOICES, config
 from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.startup_settings import (
@@ -116,7 +117,14 @@ def test_rest_api_is_removed_in_favor_of_rpc() -> None:
     stream._init_settings_ui_if_needed()
     client = TestClient(app)
 
-    for path in ("/api/v1/status", "/api/v1/mic", "/api/v1/personalities", "/api/v1/voices"):
+    for path in (
+        "/api/v1/status",
+        "/api/v1/mic",
+        "/api/v1/personalities",
+        "/api/v1/voices",
+        "/api/v1/tool_spaces",
+        "/api/v1/profile_tools",
+    ):
         assert client.get(path).status_code == 404
     assert client.get("/api/v1/conversation_events").status_code == 404
 
@@ -540,13 +548,14 @@ def test_personality_ops_delete_builtin_is_not_deletable() -> None:
     assert ei.value.reason == "not_deletable"
 
 
-def test_personality_ops_load_builtin_default_tools() -> None:
-    """load('(built-in default)') exposes the built-in default tools."""
+def test_personality_ops_load_builtin_default_profile() -> None:
+    """The bulk personality API should retain the complete profile payload."""
     ops = build_personality_ops(MagicMock(), lambda: None)
-    data = ops.load("(built-in default)")
+    data = ops.load("default")
+    assert "Reachy Mini" in data["instructions"]
     assert data["tools_text"]
-    assert "dance" in data["enabled_tools"]
-    assert "camera" in data["enabled_tools"]
+    assert data["enabled_tools"]
+    assert data["available_tools"]
 
 
 @pytest.mark.asyncio
@@ -636,11 +645,9 @@ async def test_personality_ops_use_apply_callback() -> None:
 @pytest.mark.asyncio
 async def test_apply_personality_propagates_restart_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cancellation during backend restart should not be converted into a status string."""
-    monkeypatch.setattr("reachy_mini_conversation_app.config.set_custom_profile", lambda _profile: None)
-    monkeypatch.setattr(
-        "reachy_mini_conversation_app.prompts.get_session_instructions", lambda _instance_path=None: "instructions"
-    )
-    monkeypatch.setattr("reachy_mini_conversation_app.prompts.get_session_voice", lambda default: default)
+    monkeypatch.setattr(console_mod, "set_custom_profile", lambda _profile: None)
+    monkeypatch.setattr(console_mod, "get_session_instructions", lambda _instance_path=None: "instructions")
+    monkeypatch.setattr(console_mod, "get_session_voice", lambda default: default)
 
     stream = LocalStream(MagicMock(), MagicMock())
 
@@ -651,6 +658,28 @@ async def test_apply_personality_propagates_restart_cancellation(monkeypatch: py
 
     with pytest.raises(asyncio.CancelledError):
         await stream.apply_personality("sorry_bro")
+
+
+@pytest.mark.asyncio
+async def test_apply_personality_restores_profile_when_tool_initialization_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed tool rebuild must not leave the rejected profile selected."""
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "default")
+    monkeypatch.setattr(
+        console_mod,
+        "set_custom_profile",
+        lambda profile: setattr(config, "REACHY_MINI_CUSTOM_PROFILE", profile),
+    )
+    monkeypatch.setattr(console_mod, "get_session_instructions", lambda: "instructions")
+    monkeypatch.setattr(console_mod, "get_session_voice", lambda default: default)
+    monkeypatch.setattr(console_mod, "initialize_tools", MagicMock(side_effect=RuntimeError("invalid tools")))
+    stream = LocalStream(MagicMock(), MagicMock())
+
+    with pytest.raises(RuntimeError, match="invalid tools"):
+        await stream.apply_personality("broken")
+
+    assert config.REACHY_MINI_CUSTOM_PROFILE == "default"
 
 
 @pytest.mark.asyncio
@@ -805,8 +834,8 @@ def test_rpc_transcript_notification_broadcast() -> None:
     assert msg["params"] == {"role": "assistant", "text": "hello there", "final": True}
 
 
-def test_rpc_personalities_and_voices_methods() -> None:
-    """personalities.* / voices.* are reachable over /rpc (same ops as REST)."""
+def test_rpc_settings_methods() -> None:
+    """Personality, voice, and tool settings are reachable over /rpc."""
     app = FastAPI()
     stream = LocalStream(MagicMock(), _rpc_robot(), settings_app=app)
     stream._init_settings_ui_if_needed()
@@ -815,5 +844,11 @@ def test_rpc_personalities_and_voices_methods() -> None:
         r1 = ws.receive_json()
         ws.send_json({"jsonrpc": "2.0", "id": "2", "method": "voices.list"})
         r2 = ws.receive_json()
+        ws.send_json({"jsonrpc": "2.0", "id": "3", "method": "tool_spaces.list"})
+        r3 = ws.receive_json()
+        ws.send_json({"jsonrpc": "2.0", "id": "4", "method": "profile_tools.get"})
+        r4 = ws.receive_json()
     assert "choices" in r1["result"] and "current" in r1["result"]
     assert isinstance(r2["result"], list)
+    assert "spaces" in r3["result"]
+    assert "enabled_tools" in r4["result"]

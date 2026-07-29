@@ -62,8 +62,7 @@ reachy_mini_conversation_app = [
   ".env.example",
 ]
 reachy_talk_data = [
-  "profiles/**/*.txt",
-  "profiles/**/*.py",
+  "profiles/**/*.md",
 ]
 
 [tool.ruff]

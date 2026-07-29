@@ -28,6 +28,7 @@ from reachy_mini_conversation_app.config import (
     config,
     get_default_voice,
     get_hf_session_url,
+    set_custom_profile,
     get_available_voices,
     get_hf_direct_ws_url,
     build_hf_direct_ws_url,
@@ -36,13 +37,16 @@ from reachy_mini_conversation_app.config import (
     get_hf_connection_selection,
     refresh_runtime_config_from_env,
 )
+from reachy_mini_conversation_app.prompts import get_session_voice, get_session_instructions
 from reachy_mini_conversation_app.streaming import AdditionalOutputs, audio_to_float32
 from reachy_mini_conversation_app.startup_settings import read_startup_settings, write_startup_settings
 from reachy_mini_conversation_app.tools.core_tools import initialize_tools
+from reachy_mini_conversation_app.tool_space_routes import register_tool_space_methods
 from reachy_mini_conversation_app.personality_routes import (
     build_personality_ops,
     register_personality_methods,
 )
+from reachy_mini_conversation_app.profile_tool_routes import register_profile_tool_methods
 from reachy_mini_conversation_app.audio.startup_config import apply_audio_startup_config
 from reachy_mini_conversation_app.conversation_handler import ConversationHandler
 
@@ -423,12 +427,7 @@ class LocalStream:
             return
         selection = (profile or "").strip() or None
         normalized_voice_override = (voice_override or "").strip() or None
-        try:
-            from reachy_mini_conversation_app.config import set_custom_profile
-
-            set_custom_profile(selection)
-        except Exception:
-            pass
+        set_custom_profile(selection)
 
         if not self._instance_path:
             return
@@ -449,24 +448,16 @@ class LocalStream:
 
     async def apply_personality(self, profile: Optional[str]) -> str:
         """Apply a personality by updating config and restarting the active backend."""
+        previous_profile = config.REACHY_MINI_CUSTOM_PROFILE
+        set_custom_profile(profile)
         try:
-            from reachy_mini_conversation_app.config import set_custom_profile
-            from reachy_mini_conversation_app.prompts import get_session_voice, get_session_instructions
+            get_session_instructions()
+            get_session_voice(default=get_default_voice())
+            initialize_tools(force=True)
+        except Exception:
+            set_custom_profile(previous_profile)
+            raise
 
-            previous_profile = getattr(config, "REACHY_MINI_CUSTOM_PROFILE", None)
-            set_custom_profile(profile)
-            try:
-                get_session_instructions()
-                get_session_voice(default=get_default_voice())
-            except Exception:
-                set_custom_profile(previous_profile)
-                raise
-        except Exception as e:
-            logger.error("Error applying personality '%s': %s", profile, e)
-            return f"Failed to apply personality: {e}"
-
-        # Rebuild the tool registry
-        initialize_tools(force=True)
         await self.request_backend_restart("personality_changed")
         return "Applied personality and restarting backend."
 
@@ -479,10 +470,9 @@ class LocalStream:
         if self._voice_override:
             return self._voice_override
         try:
-            from reachy_mini_conversation_app.prompts import get_session_voice
-
             return get_session_voice(default=get_default_voice())
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to resolve the current profile voice: %s", exc)
             return get_default_voice()
 
     async def change_voice(self, voice: str) -> str:
@@ -538,7 +528,8 @@ class LocalStream:
             try:
                 settings_app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
             except Exception:
-                pass
+                logger.exception("Failed to mount settings UI static assets")
+                raise
 
         def _status_payload() -> dict[str, object]:
             hf_session_url = get_hf_session_url()
@@ -661,6 +652,26 @@ class LocalStream:
             register_personality_methods(rpc, personality_ops)
         except Exception:
             logger.exception("Failed to register personality methods; the personality UI will be unavailable")
+
+        try:
+            register_tool_space_methods(
+                rpc,
+                lambda: self._asyncio_loop,
+                self.request_backend_restart,
+                instance_path=self._instance_path,
+            )
+        except Exception:
+            logger.exception("Failed to register Tool Space methods; remote tool settings will be unavailable")
+
+        try:
+            register_profile_tool_methods(
+                rpc,
+                lambda: self._asyncio_loop,
+                self.request_backend_restart,
+                instance_path=self._instance_path,
+            )
+        except Exception:
+            logger.exception("Failed to register profile tool methods; personality tool settings will be unavailable")
 
         self._settings_initialized = True
 
