@@ -222,8 +222,8 @@ async def test_camera_image_is_sent_as_one_raw_conversation_item() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_uses_fixed_model_and_sdk_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Build the session with the fixed model and no transcription override."""
+async def test_session_uses_fixed_model_sdk_defaults_and_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build the session with fixed model defaults and server-side truncation."""
     captured = {}
 
     class FakeMCPManager:
@@ -239,6 +239,7 @@ async def test_session_uses_fixed_model_and_sdk_defaults(monkeypatch: pytest.Mon
     class FakeSession:
         def __init__(self) -> None:
             self.messages = []
+            self.model = SimpleNamespace(send_event=AsyncMock())
 
         async def __aenter__(self):
             return self
@@ -300,6 +301,14 @@ async def test_session_uses_fixed_model_and_sdk_defaults(monkeypatch: pytest.Mon
     assert captured["agent"].mcp_config == {"include_server_in_tool_names": True}
     assert len(enabled_mcp_tools) == len(set(enabled_mcp_tools))
     assert fake_session.messages
+    context_config = fake_session.model.send_event.await_args_list[0].args[0]
+    assert isinstance(context_config, RealtimeModelSendRawMessage)
+    truncation = context_config.message["other_data"]["session"]["truncation"]
+    assert truncation == {
+        "type": "retention_ratio",
+        "retention_ratio": 0.8,
+        "token_limits": {"post_instructions": 64_000},
+    }
     movement_manager.set_listening.assert_called_once_with(False)
     movement_manager.set_speaking.assert_called_once_with(False)
 

@@ -44,6 +44,8 @@ logger = logging.getLogger(__name__)
 OPENAI_SAMPLE_RATE = 24_000
 AUDIO_WARNING_INTERVAL_SECONDS = 60.0
 REALTIME_AUDIO_SEND_STALL_SECONDS = 1.0
+CONTEXT_POST_INSTRUCTIONS_TOKENS = 64_000
+CONTEXT_RETENTION_RATIO = 0.8
 AudioSamples: TypeAlias = NDArray[np.float32] | NDArray[np.int16]
 InputAudioFrame: TypeAlias = tuple[int, AudioSamples]
 ActivityObserver: TypeAlias = Callable[[str], None]
@@ -241,6 +243,25 @@ class RealtimeConversation:
             }
             runner = RealtimeRunner(agent, config=run_config)
             async with await runner.run(context=self.dependencies, model_config=model_config) as session:
+                await session.model.send_event(
+                    RealtimeModelSendRawMessage(
+                        message={
+                            "type": "session.update",
+                            "other_data": {
+                                "session": {
+                                    "type": "realtime",
+                                    "truncation": {
+                                        "type": "retention_ratio",
+                                        "retention_ratio": CONTEXT_RETENTION_RATIO,
+                                        "token_limits": {
+                                            "post_instructions": CONTEXT_POST_INSTRUCTIONS_TOKENS,
+                                        },
+                                    },
+                                },
+                            },
+                        }
+                    )
+                )
                 self._session = session
                 self._agent = agent
                 self._injected_memory_revision = self.dependencies.memory.revision
