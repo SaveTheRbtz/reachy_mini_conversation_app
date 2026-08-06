@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import asyncio
 import logging
@@ -172,8 +173,9 @@ async def _invoke_forced_tool(
     return tool_event
 
 
-async def _request_audio(session: RealtimeSession, prompt: str) -> bytes:
+async def _request_response(session: RealtimeSession, prompt: str) -> tuple[bytes, str]:
     audio = bytearray()
+    transcript: list[str] = []
     audio_ended = False
     turn_ended = False
     observed_events: deque[str] = deque(maxlen=20)
@@ -191,6 +193,10 @@ async def _request_audio(session: RealtimeSession, prompt: str) -> bytes:
                     audio.extend(event.audio.data)
                 elif isinstance(event, RealtimeAudioEnd):
                     audio_ended = True
+                elif isinstance(event, RealtimeRawModelEvent) and isinstance(
+                    event.data, RealtimeModelTranscriptDeltaEvent
+                ):
+                    transcript.append(event.data.delta)
                 elif isinstance(event, RealtimeAgentEndEvent) and audio_ended:
                     turn_ended = True
                     break
@@ -203,7 +209,7 @@ async def _request_audio(session: RealtimeSession, prompt: str) -> bytes:
     assert audio_ended
     assert audio
     assert len(audio) % 2 == 0
-    return bytes(audio)
+    return bytes(audio), "".join(transcript).strip()
 
 
 async def _send_synthesized_speech(conversation: RealtimeConversation, text: str) -> None:
@@ -298,11 +304,34 @@ async def test_production_agent_tools_memory_and_audio(tmp_path: Path) -> None:
         assert MemoryState.load(tmp_path).notes == []
 
         await reloaded_session.update_agent(reloaded_agent)
-        audio = await _request_audio(
+        audio, transcript = await _request_response(
             reloaded_session,
             "Say exactly: Realtime end-to-end test passed.",
         )
         assert audio
+        assert transcript
+
+
+async def test_default_prompt_withholds_homework_answer_and_answers_facts_directly(tmp_path: Path) -> None:
+    """Exercise stable outcomes of the learning policy through a real Realtime session."""
+    memory = MemoryState.load(tmp_path)
+    dependencies, _, _ = _dependencies(tmp_path, memory)
+    agent = create_realtime_agent(())
+    runner = RealtimeRunner(agent, config=RUN_CONFIG)
+
+    async with await runner.run(context=dependencies, model_config=_model_config()) as session:
+        _, homework_response = await _request_response(
+            session,
+            "This is a homework exercise. Help me solve 9x + 8 = 71; I have not tried anything yet.",
+        )
+        _, factual_response = await _request_response(
+            session,
+            "Separate factual question, not an exercise: which planet is known as the Red Planet?",
+        )
+
+    assert homework_response
+    assert re.search(r"\b(?:7|seven)\b", homework_response.lower()) is None
+    assert "mars" in factual_response.lower()
 
 
 async def test_synthesized_speech_drives_production_audio_path(tmp_path: Path) -> None:

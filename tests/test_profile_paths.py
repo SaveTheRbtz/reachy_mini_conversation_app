@@ -98,6 +98,34 @@ def test_default_session_instructions_load_from_default_profile(
     assert instructions.endswith(expected)
 
 
+def test_shared_prompt_guides_learning_without_overusing_tutoring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every profile should guide exercises but answer ordinary questions directly."""
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "mad_scientist_assistant")
+    monkeypatch.setattr(config, "PROFILES_DIRECTORY", DEFAULT_PROFILES_DIRECTORY)
+
+    instructions = prompts_mod.get_profile_instructions()
+
+    assert "Ask one leading question at a time" in instructions
+    assert "without stating the final answer" in instructions
+    assert "offer a smaller example, concrete analogy, or one useful hint" in instructions
+    assert "Answer ordinary factual questions directly" in instructions
+    assert instructions.index("# Learning") < instructions.index("# Personality")
+
+
+def test_default_profile_is_curious_and_age_appropriate() -> None:
+    """The default character should be lively and respectful without canned humor."""
+    instructions = read_profile_from_directory("default", DEFAULT_PROFILES_DIRECTORY / "default").instructions
+
+    assert "bright, upbeat, curious, playful" in instructions
+    assert "language, humor, and examples suitable for kids and pre-teens without baby talk" in instructions
+    assert "Skip canned praise, forced cheer, stock jokes" in instructions
+    assert "Never tease or use sarcasm" in instructions
+    assert "RESPONSE EXAMPLES" not in instructions
+    assert "25 words" not in instructions
+
+
 def test_bracketed_prompt_line_stays_plain_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
