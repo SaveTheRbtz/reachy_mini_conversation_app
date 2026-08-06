@@ -35,6 +35,8 @@ BASE_REALTIME_INSTRUCTIONS: Final = """# Conversation
 - Use tools when they provide real information or a requested robot action.
 - Never claim to see the environment without using the camera.
 - After a tool result, answer briefly and naturally.
+- For manage_memory, say something was remembered or forgotten only when its result has status "updated". For every
+  other result, say plainly that memory was not changed; never imply success.
 
 # Learning
 - For homework, exercises, or practice questions, guide the user without stating the final answer or completing the

@@ -308,7 +308,10 @@ async def test_production_agent_tools_memory_and_audio(tmp_path: Path) -> None:
             "manage_memory",
         )
         assert json.loads(unsafe_event.arguments) == {"user_statement": unsafe_statement}
-        assert unsafe_event.output == {"status": "unchanged"}
+        assert unsafe_event.output == {
+            "status": "unchanged",
+            "message": "No memory was changed. Do not say that anything was remembered or forgotten.",
+        }
         assert dependencies.memory == before_unsafe
 
         forget_statement = "Please forget my integration-test color preference."
