@@ -17,7 +17,7 @@ from reachy_mini_conversation_app.profile_toolsets import (
 )
 
 
-TOOL_NAME = "pollen_robotics_reachy_mini_search_tool__search_web"
+TOOL_NAME = "web_search"
 
 
 @pytest.fixture

@@ -43,7 +43,7 @@ pytestmark = [
 TURN_TIMEOUT_SECONDS = 60
 REACHY_SAMPLE_RATE = 16_000
 MICROPHONE_CHUNK_SAMPLES = REACHY_SAMPLE_RATE // 10
-ENABLED_TOOLS = ("head_tracking", "manage_memory")
+ENABLED_TOOLS = ("head_tracking", "manage_memory", "web_search")
 BLUE_CHAIR_FIXTURE = Path(__file__).parents[1] / "fixtures" / "blue_chair.jpg"
 HEAR_TEST_AUDIO_FIXTURE = Path(__file__).parents[1] / "fixtures" / "hear_test.pcm"
 CAMERA_REQUEST_AUDIO_FIXTURE = Path(__file__).parents[1] / "fixtures" / "camera_request.pcm"
@@ -257,6 +257,17 @@ async def test_production_agent_tools_memory_and_audio(tmp_path: Path) -> None:
         assert isinstance(tracking_event.output, dict)
         assert tracking_event.output == {"status": "following"}
         movement_manager.set_head_tracking.assert_called_once_with(True)
+
+        search_query = "Search the official Python website and explain briefly what Python is."
+        search_event = await _invoke_forced_tool(
+            session,
+            dependencies,
+            f"Call web_search and pass this exact input: {json.dumps(search_query)}",
+            "web_search",
+        )
+        assert json.loads(search_event.arguments) == {"input": search_query}
+        assert isinstance(search_event.output, str)
+        assert "python" in search_event.output.casefold()
 
         add_statement = "Я люблю книги о космосе, а мой любимый тестовый цвет — кобальтовый."
         add_event = await _invoke_forced_tool(

@@ -23,7 +23,7 @@ A low-latency voice, vision, and motion app for Reachy Mini. OpenAI Agents SDK R
 - Streams microphone and speaker audio directly between Reachy Mini and OpenAI Realtime.
 - Uses semantic voice activity detection, interruption handling, and the SDK's default input transcription flow.
 - Exposes typed Agents SDK function tools for motion, camera, sleep, and shared household memory.
-- Connects a fixed, allowlisted set of public search, weather, and time MCP tools.
+- Uses OpenAI's hosted web search for current information, including weather and local time.
 - Supports bundled and user-created personalities with per-profile tool access.
 - Keeps shared household memory in the app instance directory; OpenAI processes updates but is not the durable store.
 
@@ -70,7 +70,7 @@ OPENAI_API_KEY=sk-...
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | Required. Used for `gpt-realtime-2.1` and the `gpt-5.6-luna` memory reducer. It can also be saved from the web UI. |
+| `OPENAI_API_KEY` | Required. Used for `gpt-realtime-2.1` plus the `gpt-5.6-luna` memory reducer and web-search agent. It can also be saved from the web UI. |
 | `OPENAI_VOICE` | Default OpenAI Realtime voice when neither the active profile nor saved UI settings select one. Defaults to `marin`. |
 | `REACHY_MINI_CUSTOM_PROFILE` | Optional bundled profile directory name. Ignored after a startup profile has been saved in the UI. |
 | `REACHY_MINI_APP_TIMEOUT_MINUTES` | Minutes of inactivity before Reachy sleeps and the app stops. Defaults to `15`; set to `0` to disable. |
@@ -111,11 +111,9 @@ The default profile enables the following catalog. Tools → Tool access can ena
 | `go_to_sleep` | Put Reachy to sleep and stop the app after an explicit request. |
 | `wait_for_user` | Remain silent when ambient or unclear audio is not addressed to Reachy. |
 | `manage_memory` | Consolidate an explicit durable user statement into shared household memory. |
-| `pollen_robotics_reachy_mini_search_tool__search_web` | Search the web through the fixed public MCP server. |
-| `pollen_robotics_reachy_mini_weather_tool__get_weather` | Get current weather through the fixed public MCP server. |
-| `pollen_robotics_reachy_mini_time_tool__get_time` | Get local or timezone time through the fixed public MCP server. |
+| `web_search` | Search the public web for current information, weather, or local time. |
 
-Function tools use explicit typed signatures and receive `ToolDependencies` through `RunContextWrapper`. Failures return `{"error": ...}` so a tool problem does not tear down the Realtime session. MCP startup is best-effort: an unavailable public server is logged and dropped for that session.
+Robot and memory function tools use explicit typed signatures and receive `ToolDependencies` through `RunContextWrapper`. Their failures return `{"error": ...}` so a tool problem does not tear down the Realtime session. Realtime exposes web search through an Agents SDK agent-as-tool; the nested `gpt-5.6-luna` Responses agent uses OpenAI's hosted `WebSearchTool` with low reasoning and search context, and `store=False`.
 
 ### Memory
 
@@ -164,10 +162,10 @@ mypy --pretty --show-error-codes
 pytest tests/ -v
 ```
 
-The OpenAI integration tests exercise the production agent, tools, persistent memory, PCM audio, and camera path through
-paid Realtime and Responses calls. The memory test covers Russian addition, semantic correction, forgetting, unsafe-data
-rejection, and use by a fresh Realtime session. The audio tests replay checked-in 24 kHz mono PCM speech fixtures through
-Reachy's 16 kHz stereo input; the camera test substitutes a fixed blue-chair JPEG and checks the grounded spoken reply.
+The OpenAI integration tests exercise the production agent, hosted web search, persistent memory, PCM audio, and camera
+path through paid Realtime and Responses calls. The memory test covers Russian addition, semantic correction, forgetting,
+unsafe-data rejection, and use by a fresh Realtime session. The audio tests replay checked-in 24 kHz mono PCM speech
+fixtures through Reachy's 16 kHz stereo input; the camera test substitutes a fixed blue-chair JPEG and checks the grounded spoken reply.
 They are skipped by default; run them explicitly with an API key:
 
 ```bash

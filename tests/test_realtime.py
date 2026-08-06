@@ -214,16 +214,6 @@ async def test_session_uses_fixed_model_sdk_defaults_and_truncation(monkeypatch:
     """Build the session with fixed model defaults and server-side truncation."""
     captured = {}
 
-    class FakeMCPManager:
-        active_servers = []
-        errors = {}
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return False
-
     class FakeSession:
         def __init__(self) -> None:
             self.messages = []
@@ -256,12 +246,6 @@ async def test_session_uses_fixed_model_sdk_defaults_and_truncation(monkeypatch:
             captured["model_config"] = model_config
             return fake_session
 
-    enabled_mcp_tools = []
-
-    def create_mcp_manager(tool_names):
-        enabled_mcp_tools.extend(tool_names)
-        return FakeMCPManager()
-
     movement_manager = SimpleNamespace(set_listening=MagicMock(), set_speaking=MagicMock())
     dependencies = SimpleNamespace(
         instance_path=None,
@@ -272,8 +256,6 @@ async def test_session_uses_fixed_model_sdk_defaults_and_truncation(monkeypatch:
     conversation = RealtimeConversation(dependencies, voice="marin", output_sample_rate=48_000)
     monkeypatch.setattr(realtime_module.config, "OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(realtime_module, "RealtimeRunner", CapturingRunner)
-    monkeypatch.setattr(realtime_module, "create_mcp_manager", create_mcp_manager)
-    monkeypatch.setattr(realtime_module, "log_mcp_failures", MagicMock())
 
     await conversation.start_up()
 
@@ -288,8 +270,6 @@ async def test_session_uses_fixed_model_sdk_defaults_and_truncation(monkeypatch:
     assert model_settings["parallel_tool_calls"] is False
     assert captured["run_config"]["async_tool_calls"] is False
     assert captured["run_config"]["model_settings"]["reasoning"] == {"effort": "low"}
-    assert captured["agent"].mcp_config == {"include_server_in_tool_names": True}
-    assert len(enabled_mcp_tools) == len(set(enabled_mcp_tools))
     assert fake_session.messages
     context_config = fake_session.model.send_event.await_args_list[0].args[0]
     assert isinstance(context_config, RealtimeModelSendRawMessage)

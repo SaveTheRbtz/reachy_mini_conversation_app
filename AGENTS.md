@@ -95,7 +95,6 @@ These are the cleanups we make in review over and over. Write code that wouldn't
 src/reachy_mini_conversation_app/
   main.py                 # entry point + CLI (reachy-mini-conversation-app)
   realtime.py             # Agents SDK session + audio bridge
-  mcp_servers.py          # fixed public MCP server catalog
   config.py               # configuration + env loading
   memory.py               # typed context state + local persistence
   prompts.py              # profile + dynamic memory instructions

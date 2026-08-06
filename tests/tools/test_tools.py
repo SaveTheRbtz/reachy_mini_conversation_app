@@ -77,7 +77,8 @@ def test_static_tool_registry_rejects_unknown_profile_entries() -> None:
     with pytest.raises(ValueError, match="Unknown profile tools: removed_tool"):
         get_function_tools(["camera", "removed_tool"])
 
-    assert [tool.name for tool in get_function_tools(["camera", "wait_for_user"])] == [
+    assert [tool.name for tool in get_function_tools(["camera", "web_search", "wait_for_user"])] == [
         "camera",
         "wait_for_user",
+        "web_search",
     ]

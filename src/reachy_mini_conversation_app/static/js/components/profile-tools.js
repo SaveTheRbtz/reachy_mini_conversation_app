@@ -40,7 +40,7 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
     h(
       "p",
       { class: "settings-hint settings-section-intro" },
-      "Choose exactly which robot actions and public MCP tools each personality can use."
+      "Choose exactly which tools each personality can use."
     ),
     h(
       "label",
@@ -130,11 +130,10 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
     const enabled = new Set(payload.enabled_tools || []);
     const groups = new Map();
     for (const tool of payload.available_tools || []) {
-      const key = tool.kind;
+      const key = "available";
       if (!groups.has(key)) {
-        const title = tool.kind === "mcp" ? "Public information" : "Robot tools";
         groups.set(key, {
-          title,
+          title: "Available tools",
           tools: [],
         });
       }
@@ -148,7 +147,6 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
         tools: unavailable.map((toolId) => ({
           id: toolId,
           kind: "unavailable",
-          source: "Unavailable",
           description: "Its source is not installed or the tool is no longer exposed.",
         })),
       });

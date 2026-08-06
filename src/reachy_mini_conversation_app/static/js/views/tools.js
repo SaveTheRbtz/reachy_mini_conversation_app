@@ -26,7 +26,7 @@ export async function mountToolsView({ outlet, signal, searchParams, setLeaveGua
       "header",
       { class: "view-header" },
       h("h1", { class: "view-title" }, "Tools"),
-      h("p", { class: "view-subtitle" }, "Choose which built-in and public MCP tools each personality can use.")
+      h("p", { class: "view-subtitle" }, "Choose which tools each personality can use.")
     ),
     profileToolsSection.element
   );

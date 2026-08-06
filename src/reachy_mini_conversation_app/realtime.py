@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from collections.abc import Callable, Iterable
 
 import numpy as np
-from agents.mcp import MCPServer
 from numpy.typing import NDArray
 from scipy.signal import resample_poly
 from agents.realtime import (
@@ -34,7 +33,6 @@ from reachy_mini_conversation_app.config import (
     config,
 )
 from reachy_mini_conversation_app.prompts import get_session_instructions, get_session_greeting_prompt
-from reachy_mini_conversation_app.mcp_servers import log_mcp_failures, create_mcp_manager
 from reachy_mini_conversation_app.tools.types import ToolDependencies
 from reachy_mini_conversation_app.tools.core_tools import get_function_tools, selected_tool_names
 
@@ -53,16 +51,12 @@ ActivityObserver: TypeAlias = Callable[[str], None]
 
 def create_realtime_agent(
     enabled_tool_names: Iterable[str],
-    *,
-    mcp_servers: Iterable[MCPServer] = (),
 ) -> RealtimeAgent[ToolDependencies]:
     """Build the production Realtime agent for the selected tools."""
     return RealtimeAgent[ToolDependencies](
         name="Reachy Mini",
         instructions=get_session_instructions,
         tools=get_function_tools(enabled_tool_names),
-        mcp_servers=list(mcp_servers),
-        mcp_config={"include_server_in_tool_names": True},
     )
 
 
@@ -206,76 +200,71 @@ class RealtimeConversation:
         enabled_tool_names = selected_tool_names(
             str(self.dependencies.instance_path) if self.dependencies.instance_path is not None else None
         )
-        async with create_mcp_manager(enabled_tool_names) as mcp_manager:
-            log_mcp_failures(mcp_manager)
-            agent = create_realtime_agent(
-                enabled_tool_names,
-                mcp_servers=mcp_manager.active_servers,
-            )
-            run_config: RealtimeRunConfig = {
-                "tracing_disabled": True,
-                "async_tool_calls": False,
-                "model_settings": {
-                    "reasoning": {"effort": "low"},
-                },
-            }
-            model_config: RealtimeModelConfig = {
-                "api_key": api_key,
-                "playback_tracker": self._playback_tracker,
-                "initial_model_settings": {
-                    "model_name": REALTIME_MODEL,
-                    "output_modalities": ["audio"],
-                    "parallel_tool_calls": False,
-                    "audio": {
-                        "input": {
-                            "format": "pcm16",
-                            "noise_reduction": {"type": "near_field"},
-                            "turn_detection": {
-                                "type": "semantic_vad",
-                                "create_response": True,
-                                "interrupt_response": True,
-                                "eagerness": "auto",
-                            },
+        agent = create_realtime_agent(enabled_tool_names)
+        run_config: RealtimeRunConfig = {
+            "tracing_disabled": True,
+            "async_tool_calls": False,
+            "model_settings": {
+                "reasoning": {"effort": "low"},
+            },
+        }
+        model_config: RealtimeModelConfig = {
+            "api_key": api_key,
+            "playback_tracker": self._playback_tracker,
+            "initial_model_settings": {
+                "model_name": REALTIME_MODEL,
+                "output_modalities": ["audio"],
+                "parallel_tool_calls": False,
+                "audio": {
+                    "input": {
+                        "format": "pcm16",
+                        "noise_reduction": {"type": "near_field"},
+                        "turn_detection": {
+                            "type": "semantic_vad",
+                            "create_response": True,
+                            "interrupt_response": True,
+                            "eagerness": "auto",
                         },
-                        "output": {"format": "pcm16", "voice": self.voice},
                     },
+                    "output": {"format": "pcm16", "voice": self.voice},
                 },
-            }
-            runner = RealtimeRunner(agent, config=run_config)
-            async with await runner.run(context=self.dependencies, model_config=model_config) as session:
-                await session.model.send_event(
-                    RealtimeModelSendRawMessage(
-                        message={
-                            "type": "session.update",
-                            "other_data": {
-                                "session": {
-                                    "type": "realtime",
-                                    "truncation": {
-                                        "type": "retention_ratio",
-                                        "retention_ratio": CONTEXT_RETENTION_RATIO,
-                                        "token_limits": {
-                                            "post_instructions": CONTEXT_POST_INSTRUCTIONS_TOKENS,
-                                        },
+            },
+        }
+        runner = RealtimeRunner(agent, config=run_config)
+        async with await runner.run(context=self.dependencies, model_config=model_config) as session:
+            await session.model.send_event(
+                RealtimeModelSendRawMessage(
+                    message={
+                        "type": "session.update",
+                        "other_data": {
+                            "session": {
+                                "type": "realtime",
+                                "truncation": {
+                                    "type": "retention_ratio",
+                                    "retention_ratio": CONTEXT_RETENTION_RATIO,
+                                    "token_limits": {
+                                        "post_instructions": CONTEXT_POST_INSTRUCTIONS_TOKENS,
                                     },
                                 },
                             },
-                        }
-                    )
+                        },
+                    }
                 )
-                self._session = session
-                self.dependencies.send_image = self._send_image
-                self._mark_activity("connected")
-                try:
-                    await session.send_message(get_session_greeting_prompt())
-                    async for event in session:
-                        await self._handle_event(event)
-                finally:
-                    self._clear_playback()
-                    self.dependencies.send_image = None
-                    self.dependencies.movement_manager.set_listening(False)
-                    self.dependencies.movement_manager.set_speaking(False)
-                    self._session = None
-                    self._mark_activity("disconnected")
+            )
+            self._session = session
+            self.dependencies.send_image = self._send_image
+            self._mark_activity("connected")
+            try:
+                await session.send_message(get_session_greeting_prompt())
+                async for event in session:
+                    await self._handle_event(event)
+            finally:
+                self._clear_playback()
+                self.dependencies.send_image = None
+                self.dependencies.movement_manager.set_listening(False)
+                self.dependencies.movement_manager.set_speaking(False)
+                self._session = None
+                self._mark_activity("disconnected")
 
     async def shutdown(self) -> None:
         """Close the active session."""
