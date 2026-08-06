@@ -43,22 +43,19 @@ RUN_CONFIG: RealtimeRunConfig = {
 }
 
 
-@pytest.fixture
-def openai_api_key() -> str:
-    """Return credentials for explicitly enabled OpenAI integration tests."""
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
+@pytest.fixture(autouse=True)
+def _require_openai_api_key() -> None:
+    """Require credentials for explicitly enabled OpenAI integration tests."""
+    if not os.getenv("OPENAI_API_KEY", "").strip():
         pytest.fail("OPENAI_API_KEY is required when RUN_OPENAI_ITESTS=1")
-    return api_key
 
 
-def _model_config(api_key: str) -> RealtimeModelConfig:
+def _model_config() -> RealtimeModelConfig:
     return {
-        "api_key": api_key,
         "initial_model_settings": {
             "model_name": REALTIME_MODEL,
             "output_modalities": ["audio"],
-            "max_output_tokens": 128,
+            "max_output_tokens": 512,
             "audio": {
                 "output": {"format": "pcm16", "voice": "marin"},
             },
@@ -69,17 +66,17 @@ def _model_config(api_key: str) -> RealtimeModelConfig:
 async def _invoke_forced_tool(
     agent: RealtimeAgent[ToolDependencies],
     dependencies: ToolDependencies,
-    api_key: str,
     prompt: str,
     tool_name: str,
 ) -> RealtimeToolEnd:
     runner = RealtimeRunner(agent, config=RUN_CONFIG)
     tool_event: RealtimeToolEnd | None = None
+    observed_events: list[str] = []
     try:
         async with asyncio.timeout(TURN_TIMEOUT_SECONDS):
             async with await runner.run(
                 context=dependencies,
-                model_config=_model_config(api_key),
+                model_config=_model_config(),
             ) as session:
                 await session.model.send_event(
                     RealtimeModelSendRawMessage(
@@ -108,13 +105,16 @@ async def _invoke_forced_tool(
                     )
                 )
                 async for event in session:
+                    observed_events.append(type(event).__name__)
                     if isinstance(event, RealtimeError):
                         pytest.fail(f"Realtime API error: {event.error}")
                     if isinstance(event, RealtimeToolEnd) and event.tool.name == tool_name:
                         tool_event = event
                         break
+                    if isinstance(event, RealtimeAgentEndEvent):
+                        pytest.fail(f"Realtime turn ended without calling {tool_name}; events={observed_events}")
     except TimeoutError:
-        pytest.fail(f"Realtime did not call {tool_name} within {TURN_TIMEOUT_SECONDS}s")
+        pytest.fail(f"Realtime did not call {tool_name} within {TURN_TIMEOUT_SECONDS}s; events={observed_events}")
     if tool_event is None:
         pytest.fail(f"Realtime session closed before calling {tool_name}")
     return tool_event
@@ -137,7 +137,7 @@ def _memory_dependencies(path: Path, memory: MemoryState) -> ToolDependencies:
     )
 
 
-async def test_gpt_realtime_audio_response(openai_api_key: str) -> None:
+async def test_gpt_realtime_audio_response() -> None:
     """Receive real PCM audio from the fixed Realtime model."""
     agent = RealtimeAgent(
         name="Reachy Mini Realtime integration test",
@@ -150,7 +150,7 @@ async def test_gpt_realtime_audio_response(openai_api_key: str) -> None:
 
     try:
         async with asyncio.timeout(TURN_TIMEOUT_SECONDS):
-            async with await runner.run(model_config=_model_config(openai_api_key)) as session:
+            async with await runner.run(model_config=_model_config()) as session:
                 await session.send_message("Confirm this connection in five words or fewer.")
                 async for event in session:
                     if isinstance(event, RealtimeError):
@@ -171,13 +171,12 @@ async def test_gpt_realtime_audio_response(openai_api_key: str) -> None:
     assert len(audio) % 2 == 0
 
 
-async def test_memory_persists_across_realtime_sessions(openai_api_key: str, tmp_path: Path) -> None:
+async def test_memory_persists_across_realtime_sessions(tmp_path: Path) -> None:
     """Save and forget durable context through real Realtime tool calls."""
     memory = MemoryState.load(tmp_path)
     remember_event = await _invoke_forced_tool(
         _memory_agent(remember),
         _memory_dependencies(tmp_path, memory),
-        openai_api_key,
         "Save this durable preference verbatim: "
         '"Prefers the integration-test color cobalt". Pass null as replaces_memory_id.',
         "remember",
@@ -199,7 +198,6 @@ async def test_memory_persists_across_realtime_sessions(openai_api_key: str, tmp
     forget_event = await _invoke_forced_tool(
         _memory_agent(forget),
         _memory_dependencies(tmp_path, reloaded_memory),
-        openai_api_key,
         "Remove the saved integration-test color preference. Use its exact bracketed ID from <user_memories>.",
         "forget",
     )
