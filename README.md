@@ -163,9 +163,10 @@ mypy --pretty --show-error-codes
 pytest tests/ -v
 ```
 
-The OpenAI integration tests exercise the production agent, tools, persistent memory, and PCM audio through paid calls.
-The audio-path test synthesizes speech with `gpt-4o-mini-tts`, converts it to Reachy's 16 kHz stereo input, and sends it
-to `gpt-realtime-2.1`. They are skipped by default; run them explicitly with an API key:
+The OpenAI integration tests exercise the production agent, tools, persistent memory, PCM audio, and camera path through
+paid calls. The audio tests synthesize speech with `gpt-4o-mini-tts`, convert it to Reachy's 16 kHz stereo input, and
+send it to `gpt-realtime-2.1`; the camera test substitutes a fixed blue-chair JPEG and checks the grounded spoken reply.
+They are skipped by default; run them explicitly with an API key:
 
 ```bash
 RUN_OPENAI_ITESTS=1 OPENAI_API_KEY=sk-... pytest tests/integration/ -v
