@@ -24,6 +24,7 @@ from agents.realtime import (
     RealtimeModelConfig,
     RealtimeSessionEvent,
     RealtimeAgentEndEvent,
+    RealtimeRawModelEvent,
     RealtimePlaybackTracker,
     RealtimeAudioInterrupted,
     RealtimeModelSendRawMessage,
@@ -383,6 +384,14 @@ class RealtimeConversation:
             self.dependencies.movement_manager.set_listening(True)
             self._clear_playback()
             self._mark_activity("listening")
+        elif isinstance(event, RealtimeRawModelEvent) and event.data.type == "raw_server_event":
+            raw_server_event: object = event.data.data
+            if isinstance(raw_server_event, dict):
+                event_type: object = raw_server_event.get("type")
+                if event_type == "input_audio_buffer.speech_started":
+                    self._mark_activity("listening")
+                elif event_type == "input_audio_buffer.speech_stopped":
+                    self._mark_activity("thinking")
         elif isinstance(event, RealtimeAudioEnd):
             self.output_queue.put_nowait(None)
         elif isinstance(event, RealtimeToolStart):

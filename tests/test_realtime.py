@@ -1,7 +1,7 @@
 import base64
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import numpy as np
 import pytest
@@ -10,10 +10,12 @@ from agents.realtime import (
     RealtimeAudioEnd,
     RealtimeEventInfo,
     RealtimeAgentEndEvent,
+    RealtimeRawModelEvent,
     RealtimeModelAudioEvent,
     RealtimeAudioInterrupted,
     RealtimeModelSendRawMessage,
 )
+from agents.realtime.model_events import RealtimeModelRawServerEvent
 
 import reachy_mini_conversation_app.realtime as realtime_module
 from reachy_mini_conversation_app.memory import MemoryState
@@ -91,6 +93,9 @@ async def test_microphone_forwarding_logs_success_and_throttles_delay_warnings(
 ) -> None:
     """Expose successful but slow microphone forwarding without flooding logs."""
     conversation = _conversation()
+    activity_observer = MagicMock()
+    conversation.set_activity_observer(activity_observer)
+    last_activity_time = conversation.last_activity_time
     session = SimpleNamespace(send_audio=AsyncMock())
     conversation._session = session
     monkeypatch.setattr(realtime_module, "REALTIME_AUDIO_SEND_STALL_SECONDS", 0.0)
@@ -103,6 +108,35 @@ async def test_microphone_forwarding_logs_success_and_throttles_delay_warnings(
     assert sum("Realtime microphone forwarding started" in message for message in caplog.messages) == 1
     assert sum("Realtime microphone forwarding delayed" in message for message in caplog.messages) == 1
     assert session.send_audio.await_count == 2
+    assert conversation.last_activity_time == last_activity_time
+    activity_observer.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_vad_speech_transitions_mark_user_activity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset inactivity only when server VAD detects user speech."""
+    conversation = _conversation()
+    activity_observer = MagicMock()
+    conversation.set_activity_observer(activity_observer)
+    monkeypatch.setattr(
+        realtime_module,
+        "time",
+        SimpleNamespace(monotonic=MagicMock(side_effect=[100.0, 200.0])),
+    )
+
+    for event_type in (
+        "input_audio_buffer.speech_started",
+        "input_audio_buffer.speech_stopped",
+    ):
+        await conversation._handle_event(
+            RealtimeRawModelEvent(
+                data=RealtimeModelRawServerEvent(data={"type": event_type}),
+                info=RealtimeEventInfo(context=MagicMock()),
+            )
+        )
+
+    assert conversation.last_activity_time == 200.0
+    assert activity_observer.call_args_list == [call("listening"), call("thinking")]
 
 
 @pytest.mark.asyncio

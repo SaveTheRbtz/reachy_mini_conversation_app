@@ -3,14 +3,12 @@ import re
 import json
 import asyncio
 import logging
-from typing import Literal
 from pathlib import Path
 from collections import deque
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from openai import AsyncOpenAI
 from scipy.signal import resample_poly
 from agents.realtime import (
     RealtimeAudio,
@@ -47,6 +45,8 @@ REACHY_SAMPLE_RATE = 16_000
 MICROPHONE_CHUNK_SAMPLES = REACHY_SAMPLE_RATE // 10
 ENABLED_TOOLS = ("head_tracking", "remember", "forget")
 BLUE_CHAIR_FIXTURE = Path(__file__).parents[1] / "fixtures" / "blue_chair.jpg"
+HEAR_TEST_AUDIO_FIXTURE = Path(__file__).parents[1] / "fixtures" / "hear_test.pcm"
+CAMERA_REQUEST_AUDIO_FIXTURE = Path(__file__).parents[1] / "fixtures" / "camera_request.pcm"
 RUN_CONFIG: RealtimeRunConfig = {
     "tracing_disabled": True,
     "async_tool_calls": False,
@@ -61,13 +61,16 @@ def _require_openai_api_key() -> None:
         pytest.fail("OPENAI_API_KEY is required when RUN_OPENAI_ITESTS=1")
 
 
-def _model_config(*, tool_choice: Literal["auto", "none"] = "none") -> RealtimeModelConfig:
+def _model_config(
+    *,
+    automatic_response: bool = True,
+) -> RealtimeModelConfig:
     return {
         "initial_model_settings": {
             "model_name": REALTIME_MODEL,
             "output_modalities": ["audio"],
             "max_output_tokens": 512,
-            "tool_choice": tool_choice,
+            "tool_choice": "none",
             "parallel_tool_calls": False,
             "audio": {
                 "input": {
@@ -75,8 +78,8 @@ def _model_config(*, tool_choice: Literal["auto", "none"] = "none") -> RealtimeM
                     "noise_reduction": {"type": "near_field"},
                     "turn_detection": {
                         "type": "semantic_vad",
-                        "create_response": True,
-                        "interrupt_response": True,
+                        "create_response": automatic_response,
+                        "interrupt_response": automatic_response,
                         "eagerness": "auto",
                     },
                 },
@@ -98,6 +101,21 @@ def _dependencies(path: Path, memory: MemoryState) -> tuple[ToolDependencies, Ma
         ),
         movement_manager,
         reachy_mini,
+    )
+
+
+async def _request_tool(session: RealtimeSession, tool_name: str) -> None:
+    await session.model.send_event(
+        RealtimeModelSendRawMessage(
+            message={
+                "type": "response.create",
+                "other_data": {
+                    "response": {
+                        "tool_choice": {"type": "function", "name": tool_name},
+                    }
+                },
+            }
+        )
     )
 
 
@@ -129,18 +147,7 @@ async def _invoke_forced_tool(
                     }
                 )
             )
-            await session.model.send_event(
-                RealtimeModelSendRawMessage(
-                    message={
-                        "type": "response.create",
-                        "other_data": {
-                            "response": {
-                                "tool_choice": {"type": "function", "name": tool_name},
-                            }
-                        },
-                    }
-                )
-            )
+            await _request_tool(session, tool_name)
             async for event in session:
                 observed_events.append(type(event).__name__)
                 if isinstance(event, RealtimeError):
@@ -212,16 +219,8 @@ async def _request_response(session: RealtimeSession, prompt: str) -> tuple[byte
     return bytes(audio), "".join(transcript).strip()
 
 
-async def _send_synthesized_speech(conversation: RealtimeConversation, text: str) -> None:
-    async with AsyncOpenAI(timeout=20.0, max_retries=1) as client:
-        speech = await client.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice="coral",
-            input=text,
-            instructions="Speak clearly and briskly without long pauses.",
-            response_format="pcm",
-        )
-    microphone_pcm = np.frombuffer(speech.content, dtype="<i2").astype(np.float32) / 32768.0
+async def _send_speech_fixture(conversation: RealtimeConversation, fixture: Path) -> None:
+    microphone_pcm = np.frombuffer(fixture.read_bytes(), dtype="<i2").astype(np.float32) / 32768.0
     microphone_mono = np.asarray(
         resample_poly(microphone_pcm, REACHY_SAMPLE_RATE, OPENAI_SAMPLE_RATE),
         dtype=np.float32,
@@ -339,6 +338,8 @@ async def test_synthesized_speech_drives_production_audio_path(tmp_path: Path) -
     memory = MemoryState.load(tmp_path)
     dependencies, _, _ = _dependencies(tmp_path, memory)
     conversation = RealtimeConversation(dependencies, voice="coral", output_sample_rate=48_000)
+    activity_reasons: list[str] = []
+    conversation.set_activity_observer(activity_reasons.append)
     assistant_audio_bytes = 0
     assistant_audio_ended = False
     assistant_transcript: list[str] = []
@@ -353,7 +354,7 @@ async def test_synthesized_speech_drives_production_audio_path(tmp_path: Path) -
                 conversation._session = session
                 try:
                     phase = "microphone upload"
-                    await _send_synthesized_speech(conversation, "Can you hear this synthesized microphone test?")
+                    await _send_speech_fixture(conversation, HEAR_TEST_AUDIO_FIXTURE)
 
                     phase = "Realtime response"
                     async for event in session:
@@ -388,13 +389,15 @@ async def test_synthesized_speech_drives_production_audio_path(tmp_path: Path) -
     assert assistant_audio_ended
     assert assistant_audio_bytes > 0
     assert "".join(assistant_transcript).strip()
+    assert "listening" in activity_reasons
+    assert "thinking" in activity_reasons
     playback = await conversation.emit()
     assert playback is not None
     assert playback.samples.size > 0
 
 
 async def test_synthesized_speech_uses_camera_image(tmp_path: Path) -> None:
-    """Exercise spoken camera selection and image-grounded audio output."""
+    """Exercise spoken camera execution and image-grounded audio output."""
     memory = MemoryState.load(tmp_path)
     dependencies, _, reachy_mini = _dependencies(tmp_path, memory)
     camera_capture = MagicMock(return_value=BLUE_CHAIR_FIXTURE.read_bytes())
@@ -405,6 +408,7 @@ async def test_synthesized_speech_uses_camera_image(tmp_path: Path) -> None:
     assistant_audio_ended = False
     assistant_transcript: list[str] = []
     observed_events: deque[str] = deque(maxlen=20)
+    response_requested = False
     phase = "Realtime connection"
 
     try:
@@ -413,22 +417,28 @@ async def test_synthesized_speech_uses_camera_image(tmp_path: Path) -> None:
             runner = RealtimeRunner(agent, config=RUN_CONFIG)
             async with await runner.run(
                 context=dependencies,
-                model_config=_model_config(tool_choice="auto"),
+                model_config=_model_config(automatic_response=False),
             ) as session:
                 conversation._session = session
                 conversation._agent = agent
                 dependencies.send_image = conversation._send_image
                 try:
                     phase = "spoken camera request"
-                    await _send_synthesized_speech(
-                        conversation,
-                        "Please use your camera. What is the main object you see, and what color is it?",
-                    )
+                    await _send_speech_fixture(conversation, CAMERA_REQUEST_AUDIO_FIXTURE)
 
                     phase = "camera response"
                     async for event in session:
                         observed_events.append(type(event).__name__)
                         await conversation._handle_event(event)
+                        if isinstance(event, RealtimeRawModelEvent) and event.data.type == "raw_server_event":
+                            raw_event: object = event.data.data
+                            if (
+                                isinstance(raw_event, dict)
+                                and raw_event.get("type") == "input_audio_buffer.committed"
+                                and not response_requested
+                            ):
+                                await _request_tool(session, "camera")
+                                response_requested = True
                         if isinstance(event, RealtimeError):
                             pytest.fail(f"Realtime API error: {type(event.error).__name__}")
                         if isinstance(event, RealtimeToolEnd):
@@ -451,7 +461,9 @@ async def test_synthesized_speech_uses_camera_image(tmp_path: Path) -> None:
                         ):
                             assistant_transcript.append(event.data.delta)
                         elif isinstance(event, RealtimeAgentEndEvent):
-                            if camera_event is not None and assistant_audio_ended:
+                            if camera_event is None:
+                                break
+                            if assistant_audio_ended:
                                 break
                 finally:
                     dependencies.send_image = None
@@ -470,6 +482,7 @@ async def test_synthesized_speech_uses_camera_image(tmp_path: Path) -> None:
 
     if camera_event is None:
         pytest.fail(f"Realtime session ended without calling camera; events={list(observed_events)}")
+    assert response_requested
     assert isinstance(camera_event.output, dict)
     assert camera_event.output["status"] == "image submitted"
     camera_question = camera_event.output["question"]
