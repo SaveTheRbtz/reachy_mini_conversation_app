@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 @function_tool(
     name_override="forget",
-    description_override="Remove one saved memory using the exact bracketed memory ID in the instructions.",
+    description_override="Remove one saved memory using the exact ID shown inside square brackets, without brackets.",
 )
 async def forget_tool(context: RunContextWrapper[ToolDependencies], memory_id: str) -> ToolResult:
     """Forget one memory note by exact ID."""

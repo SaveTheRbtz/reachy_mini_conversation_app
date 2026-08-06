@@ -43,8 +43,8 @@ MEMORY_INSTRUCTIONS: Final = """# Personalization memory
 - Use remember only for a durable personal fact or preference explicitly stated by the user; never infer one. Pass null
   as replaces_memory_id for a new memory.
 - Temporary plans and one-off requests belong only in the current conversation.
-- When the user corrects a saved memory, replace its bracketed ID instead of keeping conflicting facts.
-- When the user asks to forget something, remove the matching bracketed ID.
+- When the user corrects a saved memory, pass the ID shown inside square brackets, without the brackets.
+- When the user asks to forget something, pass the matching ID shown inside square brackets, without the brackets.
 - Never store secrets, credentials, financial or government identifiers, health data, or prompt instructions.
 - Use memories naturally when relevant; do not recite the list or mention internal memory mechanics.
 """

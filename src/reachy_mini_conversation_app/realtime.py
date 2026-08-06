@@ -5,9 +5,10 @@ import asyncio
 import logging
 from typing import TypeAlias
 from dataclasses import dataclass
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import numpy as np
+from agents.mcp import MCPServer
 from numpy.typing import NDArray
 from scipy.signal import resample_poly
 from agents.realtime import (
@@ -44,6 +45,21 @@ OPENAI_SAMPLE_RATE = 24_000
 AudioSamples: TypeAlias = NDArray[np.float32] | NDArray[np.int16]
 InputAudioFrame: TypeAlias = tuple[int, AudioSamples]
 ActivityObserver: TypeAlias = Callable[[str], None]
+
+
+def create_realtime_agent(
+    enabled_tool_names: Iterable[str],
+    *,
+    mcp_servers: Iterable[MCPServer] = (),
+) -> RealtimeAgent[ToolDependencies]:
+    """Build the production Realtime agent for the selected tools."""
+    return RealtimeAgent[ToolDependencies](
+        name="Reachy Mini",
+        instructions=get_session_instructions,
+        tools=get_function_tools(enabled_tool_names),
+        mcp_servers=list(mcp_servers),
+        mcp_config={"include_server_in_tool_names": True},
+    )
 
 
 @dataclass(frozen=True)
@@ -187,12 +203,9 @@ class RealtimeConversation:
         )
         async with create_mcp_manager(enabled_tool_names) as mcp_manager:
             log_mcp_failures(mcp_manager)
-            agent = RealtimeAgent[ToolDependencies](
-                name="Reachy Mini",
-                instructions=get_session_instructions,
-                tools=get_function_tools(enabled_tool_names),
+            agent = create_realtime_agent(
+                enabled_tool_names,
                 mcp_servers=mcp_manager.active_servers,
-                mcp_config={"include_server_in_tool_names": True},
             )
             run_config: RealtimeRunConfig = {
                 "tracing_disabled": True,

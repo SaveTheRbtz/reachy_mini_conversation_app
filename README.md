@@ -163,7 +163,8 @@ mypy --pretty --show-error-codes
 pytest tests/ -v
 ```
 
-The OpenAI integration tests make paid calls to `gpt-realtime-2.1` and are skipped by default. Run them explicitly with an API key:
+The OpenAI integration test exercises the production agent, tools, persistent memory, and PCM audio through paid calls
+to `gpt-realtime-2.1`. It is skipped by default; run it explicitly with an API key:
 
 ```bash
 RUN_OPENAI_ITESTS=1 OPENAI_API_KEY=sk-... pytest tests/integration/ -v

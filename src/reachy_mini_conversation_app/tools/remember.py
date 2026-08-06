@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
     name_override="remember",
     description_override=(
         "Save one durable, non-sensitive fact explicitly stated by the user. "
-        "Pass replaces_memory_id=null for a new memory, or its exact bracketed ID when correcting one."
+        "Pass replaces_memory_id=null for a new memory, or the exact ID shown inside square brackets without brackets "
+        "when correcting one."
     ),
 )
 async def remember_tool(
