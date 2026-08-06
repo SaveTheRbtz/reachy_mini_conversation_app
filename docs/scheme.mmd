@@ -9,11 +9,12 @@ flowchart TB
     Robot@{ label: "<span style='font-size:16px;font-weight:bold;'>Reachy Mini SDK</span><br><span style='font-size:13px;color:#c62828;'>Microphone, speaker, camera, motion</span>" }
     App@{ label: "<span style='font-size:16px;font-weight:bold;'>Conversation App</span><br><span style='font-size:12px;color:#0277bd;'>One session owner + audio bridge</span>" }
     Realtime@{ label: "<span style='font-size:16px;font-weight:bold;'>OpenAI Realtime</span><br><span style='font-size:12px;color:#7b1fa2;'>gpt-realtime-2.1 via Agents SDK</span>" }
-    Tools@{ label: "<span style='font-size:16px;font-weight:bold;'>Typed Tool Layer</span><br><span style='font-size:12px;color:#f9a825;'>Robot functions + memory tools</span>" }
+    Tools@{ label: "<span style='font-size:16px;font-weight:bold;'>Typed Tool Layer</span><br><span style='font-size:12px;color:#f9a825;'>Robot functions + manage_memory</span>" }
+    Reducer@{ label: "<span style='font-size:16px;font-weight:bold;'>Memory Reducer</span><br><span style='font-size:12px;color:#7b1fa2;'>gpt-5.6-luna Structured Output</span>" }
     MCP@{ label: "<span style='font-size:16px;font-weight:bold;'>Public MCP Servers</span><br><span style='font-size:12px;color:#f9a825;'>Fixed search, weather, time allowlist</span>" }
     Profiles@{ label: "<span style='font-size:16px;font-weight:bold;'>Profile State</span><br><span style='font-size:12px;color:#6a1b9a;'>Personality prompt + enabled tools</span>" }
-    Context@{ label: "<span style='font-size:16px;font-weight:bold;'>Typed Run Context</span><br><span style='font-size:12px;color:#6a1b9a;'>ToolDependencies + MemoryState</span>" }
-    Memory@{ label: "<span style='font-size:16px;font-weight:bold;'>Instance Memory</span><br><span style='font-size:12px;color:#6a1b9a;'>Atomic memory.v1.json</span>" }
+    Context@{ label: "<span style='font-size:16px;font-weight:bold;'>Typed Run Context</span><br><span style='font-size:12px;color:#6a1b9a;'>ToolDependencies + MemorySnapshot</span>" }
+    Memory@{ label: "<span style='font-size:16px;font-weight:bold;'>Shared Household Memory</span><br><span style='font-size:12px;color:#6a1b9a;'>Atomic memory.json</span>" }
     UI@{ label: "<span style='font-size:16px;font-weight:bold;'>Optional Web UI</span><br><span style='font-size:12px;color:#0277bd;'>Settings and session status</span>" }
 
     User <--> Robot
@@ -21,6 +22,8 @@ flowchart TB
     App <-- realtime events --> Realtime
     Realtime -- function calls --> Tools
     Tools -- results --> Realtime
+    Tools -- snapshot + statement --> Reducer
+    Reducer -- replacement snapshot --> Tools
     Realtime <-- MCP calls --> MCP
     Profiles --> App
     App -- owns --> Context
@@ -35,6 +38,7 @@ flowchart TB
     UI:::uiStyle
     App:::uiStyle
     Realtime:::aiStyle
+    Reducer:::aiStyle
     Robot:::hardwareStyle
     Profiles:::toolStyle
     Context:::toolStyle

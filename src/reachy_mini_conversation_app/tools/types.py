@@ -5,7 +5,7 @@ from collections.abc import Callable, Awaitable
 
 from reachy_mini import ReachyMini
 from reachy_mini_conversation_app.moves import MovementManager
-from reachy_mini_conversation_app.memory import MemoryState
+from reachy_mini_conversation_app.memory import MemorySnapshot
 
 
 ToolResult = dict[str, object]
@@ -26,7 +26,7 @@ class ToolDependencies:
 
     reachy_mini: ReachyMini
     movement_manager: MovementManager
-    memory: MemoryState
+    memory: MemorySnapshot
     instance_path: str | Path | None = None
     camera_enabled: bool = True
     motion_duration_s: float = 1.0

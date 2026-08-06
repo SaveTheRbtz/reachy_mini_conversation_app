@@ -9,7 +9,6 @@ from agents.realtime import (
     RealtimeAudio,
     RealtimeAudioEnd,
     RealtimeEventInfo,
-    RealtimeAgentEndEvent,
     RealtimeRawModelEvent,
     RealtimeModelAudioEvent,
     RealtimeAudioInterrupted,
@@ -18,7 +17,7 @@ from agents.realtime import (
 from agents.realtime.model_events import RealtimeModelRawServerEvent
 
 import reachy_mini_conversation_app.realtime as realtime_module
-from reachy_mini_conversation_app.memory import MemoryState
+from reachy_mini_conversation_app.memory import MemorySnapshot
 from reachy_mini_conversation_app.realtime import PlaybackAudio, RealtimeConversation, StreamingAudioBridge
 
 
@@ -26,7 +25,7 @@ def _conversation(output_rate: int = 48_000) -> RealtimeConversation:
     dependencies = SimpleNamespace(
         instance_path=None,
         send_image=None,
-        memory=MemoryState(),
+        memory=MemorySnapshot(memories=[]),
         movement_manager=SimpleNamespace(set_listening=MagicMock(), set_speaking=MagicMock()),
     )
     return RealtimeConversation(dependencies, voice="marin", output_sample_rate=output_rate)
@@ -188,51 +187,6 @@ async def test_interruption_clears_pending_audio_and_robot_player() -> None:
 
 
 @pytest.mark.asyncio
-async def test_changed_memory_refreshes_dynamic_instructions_after_response() -> None:
-    """Refresh the agent once after a response when context memory changed."""
-    conversation = _conversation()
-    agent = MagicMock()
-    session = SimpleNamespace(update_agent=AsyncMock())
-    conversation._agent = agent
-    conversation._session = session
-    conversation.dependencies.memory.remember("Prefers concise answers")
-    event = RealtimeAgentEndEvent(
-        agent=agent,
-        info=RealtimeEventInfo(context=MagicMock()),
-    )
-
-    await conversation._handle_event(event)
-    await conversation._handle_event(event)
-
-    session.update_agent.assert_awaited_once_with(agent)
-    assert conversation._injected_memory_revision == conversation.dependencies.memory.revision
-
-
-@pytest.mark.asyncio
-async def test_memory_refresh_failure_closes_stale_session() -> None:
-    """Reconnect rather than retain deleted memory in stale instructions."""
-    conversation = _conversation()
-    agent = MagicMock()
-    session = SimpleNamespace(
-        update_agent=AsyncMock(side_effect=RuntimeError("refresh failed")),
-        close=AsyncMock(),
-    )
-    conversation._agent = agent
-    conversation._session = session
-    conversation.dependencies.memory.remember("Prefers concise answers")
-
-    await conversation._handle_event(
-        RealtimeAgentEndEvent(
-            agent=agent,
-            info=RealtimeEventInfo(context=MagicMock()),
-        )
-    )
-
-    session.close.assert_awaited_once_with()
-    assert conversation._injected_memory_revision != conversation.dependencies.memory.revision
-
-
-@pytest.mark.asyncio
 async def test_camera_image_is_sent_as_one_raw_conversation_item() -> None:
     """Send camera text and image in one ordered conversation item."""
     conversation = _conversation()
@@ -312,7 +266,7 @@ async def test_session_uses_fixed_model_sdk_defaults_and_truncation(monkeypatch:
     dependencies = SimpleNamespace(
         instance_path=None,
         send_image=None,
-        memory=MemoryState(),
+        memory=MemorySnapshot(memories=[]),
         movement_manager=movement_manager,
     )
     conversation = RealtimeConversation(dependencies, voice="marin", output_sample_rate=48_000)
@@ -331,6 +285,8 @@ async def test_session_uses_fixed_model_sdk_defaults_and_truncation(monkeypatch:
     assert audio_input["turn_detection"]["create_response"] is True
     assert audio_input["turn_detection"]["interrupt_response"] is True
     assert "transcription" not in audio_input
+    assert model_settings["parallel_tool_calls"] is False
+    assert captured["run_config"]["async_tool_calls"] is False
     assert captured["run_config"]["model_settings"]["reasoning"] == {"effort": "low"}
     assert captured["agent"].mcp_config == {"include_server_in_tool_names": True}
     assert len(enabled_mcp_tools) == len(set(enabled_mcp_tools))

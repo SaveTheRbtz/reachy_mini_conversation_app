@@ -8,8 +8,6 @@ from reachy_mini_conversation_app.mcp_servers import PUBLIC_MCP_TOOLS, PUBLIC_MC
 from reachy_mini_conversation_app.tools.dance import dance
 from reachy_mini_conversation_app.tools.types import ToolDependencies
 from reachy_mini_conversation_app.tools.camera import camera
-from reachy_mini_conversation_app.tools.forget import forget
-from reachy_mini_conversation_app.tools.remember import remember
 from reachy_mini_conversation_app.tools.move_head import move_head
 from reachy_mini_conversation_app.profile_toolsets import read_profile_tool_names
 from reachy_mini_conversation_app.tools.stop_dance import stop_dance
@@ -18,6 +16,7 @@ from reachy_mini_conversation_app.tools.go_to_sleep import go_to_sleep
 from reachy_mini_conversation_app.tools.play_emotion import play_emotion
 from reachy_mini_conversation_app.tools.stop_emotion import stop_emotion
 from reachy_mini_conversation_app.tools.head_tracking import head_tracking
+from reachy_mini_conversation_app.tools.manage_memory import manage_memory
 from reachy_mini_conversation_app.tools.wait_for_user import wait_for_user
 
 
@@ -33,12 +32,11 @@ class ToolCatalogEntry(TypedDict):
 LOCAL_TOOLS: Final[tuple[FunctionTool, ...]] = (
     camera,
     dance,
-    forget,
     go_to_sleep,
     head_tracking,
+    manage_memory,
     move_head,
     play_emotion,
-    remember,
     stop_dance,
     stop_emotion,
     sweep_look,

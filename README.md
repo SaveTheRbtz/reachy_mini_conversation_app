@@ -22,10 +22,10 @@ A low-latency voice, vision, and motion app for Reachy Mini. OpenAI Agents SDK R
 
 - Streams microphone and speaker audio directly between Reachy Mini and OpenAI Realtime.
 - Uses semantic voice activity detection, interruption handling, and the SDK's default input transcription flow.
-- Exposes typed Agents SDK function tools for motion, camera, sleep, and local memory.
+- Exposes typed Agents SDK function tools for motion, camera, sleep, and shared household memory.
 - Connects a fixed, allowlisted set of public search, weather, and time MCP tools.
 - Supports bundled and user-created personalities with per-profile tool access.
-- Keeps persistent user memories in the app instance directory; OpenAI session state is intentionally not treated as durable storage.
+- Keeps shared household memory in the app instance directory; OpenAI processes updates but is not the durable store.
 
 The implementation follows the [OpenAI Realtime guide](https://developers.openai.com/api/docs/guides/realtime), [Agents SDK guide](https://developers.openai.com/api/docs/guides/agents), and [context-personalization cookbook](https://developers.openai.com/cookbook/examples/agents_sdk/context_personalization).
 
@@ -70,13 +70,13 @@ OPENAI_API_KEY=sk-...
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | Required. Used for the `gpt-realtime-2.1` session. It can also be saved from the web UI. |
+| `OPENAI_API_KEY` | Required. Used for `gpt-realtime-2.1` and the `gpt-5.6-luna` memory reducer. It can also be saved from the web UI. |
 | `REACHY_MINI_CUSTOM_PROFILE` | Optional bundled profile directory name. Ignored after a startup profile has been saved in the UI. |
 | `REACHY_MINI_APP_TIMEOUT_MINUTES` | Minutes of inactivity before Reachy sleeps and the app stops. Defaults to `1440`; set to `0` to disable. |
 
 The UI stores the API key in the managed app instance's `.env` file and never sends the current value back to the browser. Do not commit `.env`.
 
-The model is deliberately not configurable. This keeps one tested event protocol, audio format, prompt strategy, and tool-calling path.
+The conversation and memory models are deliberately not configurable. This keeps one tested event protocol, audio format, prompt strategy, and tool-calling path.
 
 ## Running the app
 
@@ -109,7 +109,7 @@ The default profile enables the following catalog. Tools → Tool access can ena
 | `sweep_look` | Sweep left, right, and return to center. |
 | `go_to_sleep` | Put Reachy to sleep and stop the app after an explicit request. |
 | `wait_for_user` | Remain silent when ambient or unclear audio is not addressed to Reachy. |
-| `remember` / `forget` | Save or replace an explicit durable fact, or remove one by its exact memory ID. |
+| `manage_memory` | Consolidate an explicit durable user statement into shared household memory. |
 | `pollen_robotics_reachy_mini_search_tool__search_web` | Search the web through the fixed public MCP server. |
 | `pollen_robotics_reachy_mini_weather_tool__get_weather` | Get current weather through the fixed public MCP server. |
 | `pollen_robotics_reachy_mini_time_tool__get_time` | Get local or timezone time through the fixed public MCP server. |
@@ -118,11 +118,11 @@ Function tools use explicit typed signatures and receive `ToolDependencies` thro
 
 ### Memory
 
-At startup, the app loads a bounded `MemoryState` into typed `ToolDependencies`. The Agents SDK shares that state with dynamic instructions and function tools through `RunContextWrapper`. The instructions render escaped notes inside `<user_memories>` at session start; after a memory tool changes the state's revision, the session refreshes them after the current response for subsequent turns. A failed refresh closes the stale session so the supervisor can reconnect with current state.
+At startup, the app loads one `MemorySnapshot` into typed `ToolDependencies`. `manage_memory` passes that complete snapshot and the exact relevant user statement to a stateless `gpt-5.6-luna` Responses call with high reasoning, `store=False`, and a Pydantic Structured Output. The returned snapshot completely replaces the old one; there are no note IDs, per-note limits, regex classifiers, revisions, or memory-agent lifecycle.
 
-Saved notes are untrusted context, not policy. The current request takes precedence over the active conversation, which takes precedence over durable memory. Only explicit `remember` and `forget` calls mutate the state. Notes are deduplicated and limited to 20 entries of 280 characters. Prompt policy excludes secrets, identifiers, health data, and instructions; validation rejects common sensitive or secret patterns and instruction-shaped content before persistence.
+This is shared robot memory, not speaker identity: profiles do not select a memory store, and the app never infers who is speaking. The reducer is instructed to retain only explicitly stated durable interests, preferences, goals, accomplishments, and conversation preferences; resolve corrections and forgetting semantically; and omit temporary activities, sensitive child data, and model-directed instructions.
 
-`memory.v1.json` in the app instance directory (`~/.local/share/reachy_mini_conversation_app/` by default, or the desktop launcher's instance path) is updated atomically and remains the cross-session source of truth. The connected Realtime conversation supplies short-term session context; there is no remote memory store, vector index, or second-model consolidation pass. To clear all memories, stop the app and delete the file.
+`memory.json` in the app instance directory (`~/.local/share/reachy_mini_conversation_app/` by default, or the desktop launcher's instance path) remains the local source of truth. A replacement is saved atomically only after its serialized size is at most 32 KiB; any model or disk failure leaves the old snapshot unchanged. Memory is injected as untrusted background context only when a Realtime session starts, and the current request and conversation always take precedence. To clear all shared memory, stop the app and delete the file.
 
 ## Personalities
 
@@ -164,8 +164,9 @@ pytest tests/ -v
 ```
 
 The OpenAI integration tests exercise the production agent, tools, persistent memory, PCM audio, and camera path through
-paid Realtime calls. The audio tests replay checked-in 24 kHz mono PCM speech fixtures through Reachy's 16 kHz stereo
-input; the camera test substitutes a fixed blue-chair JPEG and checks the grounded spoken reply.
+paid Realtime and Responses calls. The memory test covers Russian addition, semantic correction, forgetting, unsafe-data
+rejection, and use by a fresh Realtime session. The audio tests replay checked-in 24 kHz mono PCM speech fixtures through
+Reachy's 16 kHz stereo input; the camera test substitutes a fixed blue-chair JPEG and checks the grounded spoken reply.
 They are skipped by default; run them explicitly with an API key:
 
 ```bash

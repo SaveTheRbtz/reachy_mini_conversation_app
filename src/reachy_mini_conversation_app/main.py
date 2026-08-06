@@ -23,7 +23,7 @@ from reachy_mini_conversation_app.config import (
     resolve_app_timeout_minutes,
     refresh_runtime_config_from_env,
 )
-from reachy_mini_conversation_app.memory import MemoryState
+from reachy_mini_conversation_app.memory import load_memory
 from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.prompts import get_session_voice
 from reachy_mini_conversation_app.realtime import RealtimeConversation
@@ -111,7 +111,7 @@ def run(
     dependencies = ToolDependencies(
         reachy_mini=robot,
         movement_manager=movement_manager,
-        memory=MemoryState.load(instance_path),
+        memory=load_memory(instance_path),
         instance_path=instance_path,
         camera_enabled=not args.no_camera,
     )

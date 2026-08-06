@@ -2591,7 +2591,9 @@ dependencies = [
     { name = "fastapi" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "openai" },
     { name = "openai-agents" },
+    { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "reachy-mini" },
     { name = "reachy-mini-dances-library" },
@@ -2615,7 +2617,9 @@ dev = [
 requires-dist = [
     { name = "fastapi" },
     { name = "numpy" },
-    { name = "openai-agents", specifier = "==0.19.4" },
+    { name = "openai", specifier = ">=2.50.0" },
+    { name = "openai-agents", specifier = ">=0.19.4" },
+    { name = "pydantic", specifier = ">=2.13.4" },
     { name = "python-dotenv" },
     { name = "reachy-mini", specifier = ">=1.10.0rc2" },
     { name = "reachy-mini-dances-library" },
@@ -2625,13 +2629,13 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "allure-pytest", specifier = "==2.16.0" },
-    { name = "mypy", specifier = "==2.2.0" },
+    { name = "allure-pytest", specifier = ">=2.16.0" },
+    { name = "mypy", specifier = ">=2.2.0" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
-    { name = "pytest-cov", specifier = "==7.1.0" },
-    { name = "ruff", specifier = "==0.15.20" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "ruff", specifier = ">=0.15.20" },
 ]
 
 [[package]]

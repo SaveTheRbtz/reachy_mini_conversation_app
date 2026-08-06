@@ -23,7 +23,6 @@ from agents.realtime import (
     RealtimeToolStart,
     RealtimeModelConfig,
     RealtimeSessionEvent,
-    RealtimeAgentEndEvent,
     RealtimeRawModelEvent,
     RealtimePlaybackTracker,
     RealtimeAudioInterrupted,
@@ -171,8 +170,6 @@ class RealtimeConversation:
         self.output_queue: asyncio.Queue[PlaybackAudio | None] = asyncio.Queue()
         self.last_activity_time = time.monotonic()
         self._session: RealtimeSession | None = None
-        self._agent: RealtimeAgent[ToolDependencies] | None = None
-        self._injected_memory_revision = dependencies.memory.revision
         self._activity_observer: ActivityObserver | None = None
         self._clear_player: Callable[[], None] | None = None
         self._bridge = StreamingAudioBridge(output_sample_rate)
@@ -217,6 +214,7 @@ class RealtimeConversation:
             )
             run_config: RealtimeRunConfig = {
                 "tracing_disabled": True,
+                "async_tool_calls": False,
                 "model_settings": {
                     "reasoning": {"effort": "low"},
                 },
@@ -227,6 +225,7 @@ class RealtimeConversation:
                 "initial_model_settings": {
                     "model_name": REALTIME_MODEL,
                     "output_modalities": ["audio"],
+                    "parallel_tool_calls": False,
                     "audio": {
                         "input": {
                             "format": "pcm16",
@@ -264,8 +263,6 @@ class RealtimeConversation:
                     )
                 )
                 self._session = session
-                self._agent = agent
-                self._injected_memory_revision = self.dependencies.memory.revision
                 self.dependencies.send_image = self._send_image
                 self._mark_activity("connected")
                 try:
@@ -278,7 +275,6 @@ class RealtimeConversation:
                     self.dependencies.movement_manager.set_listening(False)
                     self.dependencies.movement_manager.set_speaking(False)
                     self._session = None
-                    self._agent = None
                     self._mark_activity("disconnected")
 
     async def shutdown(self) -> None:
@@ -400,26 +396,8 @@ class RealtimeConversation:
         elif isinstance(event, RealtimeToolEnd):
             logger.info("Tool finished: %s", event.tool.name)
             self._mark_activity("thinking")
-        elif isinstance(event, RealtimeAgentEndEvent):
-            await self._refresh_memory_instructions()
         elif isinstance(event, RealtimeError):
             logger.error("Realtime session error: %s", event.error)
-
-    async def _refresh_memory_instructions(self) -> None:
-        revision = self.dependencies.memory.revision
-        if revision == self._injected_memory_revision:
-            return
-        session = self._session
-        agent = self._agent
-        if session is None or agent is None:
-            return
-        try:
-            await session.update_agent(agent)
-        except Exception as error:
-            logger.warning("Failed to refresh Realtime memory instructions; reconnecting: %s", error)
-            await session.close()
-            return
-        self._injected_memory_revision = revision
 
     def _clear_playback(self) -> None:
         self._playback_interrupted.set()

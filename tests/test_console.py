@@ -9,7 +9,7 @@ import pytest
 from agents.realtime import RealtimeAudio, RealtimeAudioEnd, RealtimeEventInfo, RealtimeModelAudioEvent
 
 import reachy_mini_conversation_app.console as console_module
-from reachy_mini_conversation_app.memory import MemoryState
+from reachy_mini_conversation_app.memory import MemorySnapshot
 from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.realtime import PlaybackAudio, RealtimeConversation
 
@@ -171,7 +171,7 @@ async def test_interruption_discards_old_tracking_before_new_audio() -> None:
     dependencies = SimpleNamespace(
         instance_path=None,
         send_image=None,
-        memory=MemoryState(),
+        memory=MemorySnapshot(memories=[]),
         movement_manager=movement_manager,
     )
     conversation = RealtimeConversation(dependencies, voice="marin", output_sample_rate=48_000)

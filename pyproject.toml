@@ -12,8 +12,10 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi",
     "numpy",
+    "openai>=2.50.0",
+    "openai-agents>=0.19.4",
+    "pydantic>=2.13.4",
     "python-dotenv",
-    "openai-agents==0.19.4",
     "scipy>=1.17.0",
     "reachy_mini_dances_library",
     "reachy-mini>=1.10.0rc2",
@@ -22,12 +24,12 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-  "allure-pytest==2.16.0",
+  "allure-pytest>=2.16.0",
   "pytest",
   "pytest-asyncio",
-  "pytest-cov==7.1.0",
-  "ruff==0.15.20",
-  "mypy==2.2.0",
+  "pytest-cov>=7.1.0",
+  "ruff>=0.15.20",
+  "mypy>=2.2.0",
   "pre-commit",
 ]
 

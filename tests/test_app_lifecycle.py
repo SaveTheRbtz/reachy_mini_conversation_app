@@ -5,7 +5,7 @@ import numpy as np
 
 from reachy_mini.reachy_mini import SLEEP_HEAD_POSE
 from reachy_mini_conversation_app import app_lifecycle
-from reachy_mini_conversation_app.memory import MemoryState
+from reachy_mini_conversation_app.memory import MemorySnapshot
 from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
 
 
@@ -68,7 +68,7 @@ def test_run_go_to_sleep_tool_uses_runtime_callback() -> None:
     deps = ToolDependencies(
         reachy_mini=MagicMock(),
         movement_manager=MagicMock(),
-        memory=MemoryState(),
+        memory=MemorySnapshot(memories=[]),
         go_to_sleep=go_to_sleep,
     )
 

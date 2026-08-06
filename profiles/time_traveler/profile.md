@@ -9,8 +9,7 @@ default_tools = [
   "wait_for_user",
   "move_head",
   "go_to_sleep",
-  "remember",
-  "forget",
+  "manage_memory",
   "head_tracking",
 ]
 +++
