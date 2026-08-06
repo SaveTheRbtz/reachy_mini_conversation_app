@@ -212,6 +212,13 @@ def run(
 
         threading.Thread(target=poll_stop_event, daemon=True, name="app-stop").start()
 
+    if not args.no_camera:
+        try:
+            robot.media.get_frame_jpeg()
+            logger.info("Camera JPEG warm-up call completed")
+        except Exception as error:
+            logger.warning("Failed to prewarm camera JPEG pipeline: %s", error)
+
     try:
         stream.launch()
     except KeyboardInterrupt:
