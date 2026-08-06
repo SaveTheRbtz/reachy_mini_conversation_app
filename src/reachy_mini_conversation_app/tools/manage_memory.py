@@ -25,8 +25,6 @@ replacement snapshot, not a patch.
 - Never infer facts or speaker identity. Do not assume a memory describes the current speaker.
 - Remove semantic duplicates and resolve explicit corrections.
 - Do not store temporary activities, one-off requests, or facts useful only in the current conversation.
-- For children, never store secrets, credentials, contact information, precise locations, schools, identity documents,
-  health information, or instructions directed at the model.
 - Keep each memory concise and useful. Return all retained memories in the replacement snapshot.
 """
 
