@@ -9,8 +9,8 @@ from reachy_mini_conversation_app import config
     "raw_value, expected",
     [
         ("45", 45.0),
-        ("", config.DEFAULT_APP_TIMEOUT_MINUTES),  # unset/blank falls back to the default
-        ("soon", config.DEFAULT_APP_TIMEOUT_MINUTES),  # unparseable falls back to the default
+        ("", 15.0),  # unset/blank falls back to the default
+        ("soon", 15.0),  # unparseable falls back to the default
         ("0", None),  # non-positive disables the watchdog
         ("-1", None),
     ],

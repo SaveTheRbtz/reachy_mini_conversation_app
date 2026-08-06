@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 REALTIME_MODEL: Final = "gpt-realtime-2.1"
 OPENAI_API_KEY_ENV: Final = "OPENAI_API_KEY"
 APP_TIMEOUT_MINUTES_ENV: Final = "REACHY_MINI_APP_TIMEOUT_MINUTES"
-DEFAULT_APP_TIMEOUT_MINUTES: Final = 1440.0
+DEFAULT_APP_TIMEOUT_MINUTES: Final = 15.0
 DEFAULT_VOICE: Final = "coral"
 OPENAI_VOICES: Final = (
     "alloy",

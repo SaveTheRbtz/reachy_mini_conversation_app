@@ -72,7 +72,7 @@ OPENAI_API_KEY=sk-...
 |----------|-------------|
 | `OPENAI_API_KEY` | Required. Used for `gpt-realtime-2.1` and the `gpt-5.6-luna` memory reducer. It can also be saved from the web UI. |
 | `REACHY_MINI_CUSTOM_PROFILE` | Optional bundled profile directory name. Ignored after a startup profile has been saved in the UI. |
-| `REACHY_MINI_APP_TIMEOUT_MINUTES` | Minutes of inactivity before Reachy sleeps and the app stops. Defaults to `1440`; set to `0` to disable. |
+| `REACHY_MINI_APP_TIMEOUT_MINUTES` | Minutes of inactivity before Reachy sleeps and the app stops. Defaults to `15`; set to `0` to disable. |
 
 The UI stores the API key in the managed app instance's `.env` file and never sends the current value back to the browser. Do not commit `.env`.
 
