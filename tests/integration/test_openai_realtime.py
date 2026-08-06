@@ -1,11 +1,15 @@
 import os
 import json
 import asyncio
+import logging
 from pathlib import Path
 from collections import deque
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
+from openai import AsyncOpenAI
+from scipy.signal import resample_poly
 from agents.realtime import (
     RealtimeAudio,
     RealtimeError,
@@ -16,15 +20,18 @@ from agents.realtime import (
     RealtimeRunConfig,
     RealtimeModelConfig,
     RealtimeAgentEndEvent,
+    RealtimeRawModelEvent,
     RealtimeModelSendRawMessage,
+    RealtimeModelTranscriptDeltaEvent,
 )
 
 from reachy_mini_conversation_app.config import REALTIME_MODEL
 from reachy_mini_conversation_app.memory import MemoryState
-from reachy_mini_conversation_app.realtime import create_realtime_agent
+from reachy_mini_conversation_app.realtime import OPENAI_SAMPLE_RATE, RealtimeConversation, create_realtime_agent
 from reachy_mini_conversation_app.tools.types import ToolDependencies
 
 
+logger = logging.getLogger(__name__)
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.asyncio,
@@ -34,6 +41,8 @@ pytestmark = [
     ),
 ]
 TURN_TIMEOUT_SECONDS = 60
+REACHY_SAMPLE_RATE = 16_000
+MICROPHONE_CHUNK_SAMPLES = REACHY_SAMPLE_RATE // 10
 ENABLED_TOOLS = ("head_tracking", "remember", "forget")
 RUN_CONFIG: RealtimeRunConfig = {
     "tracing_disabled": True,
@@ -58,7 +67,17 @@ def _model_config() -> RealtimeModelConfig:
             "tool_choice": "none",
             "parallel_tool_calls": False,
             "audio": {
-                "output": {"format": "pcm16", "voice": "marin"},
+                "input": {
+                    "format": "pcm16",
+                    "noise_reduction": {"type": "near_field"},
+                    "turn_detection": {
+                        "type": "semantic_vad",
+                        "create_response": True,
+                        "interrupt_response": True,
+                        "eagerness": "auto",
+                    },
+                },
+                "output": {"format": "pcm16", "voice": "coral"},
             },
         },
     }
@@ -254,3 +273,84 @@ async def test_production_agent_tools_memory_and_audio(tmp_path: Path) -> None:
             "Say exactly: Realtime end-to-end test passed.",
         )
         assert audio
+
+
+async def test_synthesized_speech_drives_production_audio_path(tmp_path: Path) -> None:
+    """Send synthesized microphone frames through the production Realtime bridge."""
+    memory = MemoryState.load(tmp_path)
+    dependencies, _ = _dependencies(tmp_path, memory)
+    conversation = RealtimeConversation(dependencies, voice="coral", output_sample_rate=48_000)
+    assistant_audio_bytes = 0
+    assistant_audio_ended = False
+    assistant_transcript: list[str] = []
+    observed_events: deque[str] = deque(maxlen=20)
+    phase = "speech synthesis"
+
+    try:
+        async with asyncio.timeout(TURN_TIMEOUT_SECONDS):
+            async with AsyncOpenAI(timeout=20.0, max_retries=1) as client:
+                speech = await client.audio.speech.create(
+                    model="gpt-4o-mini-tts",
+                    voice="coral",
+                    input="Can you hear this synthesized microphone test?",
+                    instructions="Speak clearly and briskly without long pauses.",
+                    response_format="pcm",
+                )
+            microphone_pcm = np.frombuffer(speech.content, dtype="<i2").astype(np.float32) / 32768.0
+            microphone_mono = np.asarray(
+                resample_poly(microphone_pcm, REACHY_SAMPLE_RATE, OPENAI_SAMPLE_RATE),
+                dtype=np.float32,
+            )
+            microphone_stereo = np.column_stack((microphone_mono, microphone_mono))
+            assert microphone_stereo.size > 0
+
+            phase = "Realtime connection"
+            agent = create_realtime_agent(())
+            runner = RealtimeRunner(agent, config=RUN_CONFIG)
+            async with await runner.run(context=dependencies, model_config=_model_config()) as session:
+                conversation._session = session
+                try:
+                    phase = "microphone upload"
+                    trailing_silence = np.zeros((REACHY_SAMPLE_RATE * 2, 2), dtype=np.float32)
+                    microphone_stream = np.concatenate((microphone_stereo, trailing_silence))
+                    for offset in range(0, microphone_stream.shape[0], MICROPHONE_CHUNK_SAMPLES):
+                        frame = microphone_stream[offset : offset + MICROPHONE_CHUNK_SAMPLES]
+                        await conversation.receive((REACHY_SAMPLE_RATE, frame))
+                        await asyncio.sleep(frame.shape[0] / REACHY_SAMPLE_RATE)
+
+                    phase = "Realtime response"
+                    async for event in session:
+                        observed_events.append(type(event).__name__)
+                        await conversation._handle_event(event)
+                        if isinstance(event, RealtimeError):
+                            pytest.fail(f"Realtime API error: {type(event.error).__name__}")
+                        if isinstance(event, RealtimeAudio):
+                            assistant_audio_bytes += len(event.audio.data)
+                        elif isinstance(event, RealtimeAudioEnd):
+                            assistant_audio_ended = True
+                        elif isinstance(event, RealtimeRawModelEvent) and isinstance(
+                            event.data, RealtimeModelTranscriptDeltaEvent
+                        ):
+                            assistant_transcript.append(event.data.delta)
+                        elif isinstance(event, RealtimeAgentEndEvent) and assistant_audio_ended:
+                            break
+                    phase = "Realtime cleanup"
+                finally:
+                    conversation._session = None
+    except TimeoutError:
+        logger.error(
+            "Synthesized speech path timed out during %s; events=%s",
+            phase,
+            list(observed_events),
+        )
+        pytest.fail(
+            f"Synthesized speech path timed out during {phase} within "
+            f"{TURN_TIMEOUT_SECONDS}s; events={list(observed_events)}"
+        )
+
+    assert assistant_audio_ended
+    assert assistant_audio_bytes > 0
+    assert "".join(assistant_transcript).strip()
+    playback = await conversation.emit()
+    assert playback is not None
+    assert playback.samples.size > 0

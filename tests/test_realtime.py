@@ -1,5 +1,5 @@
 import base64
-import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -77,6 +77,7 @@ async def test_audio_event_keeps_source_pcm_for_delayed_playback_accounting() ->
     await conversation._handle_event(event)
     queued = await conversation.emit()
 
+    assert queued is not None
     assert queued.item_id == "item"
     assert queued.content_index == 2
     assert queued.source_pcm16 == pcm16
@@ -84,8 +85,29 @@ async def test_audio_event_keeps_source_pcm_for_delayed_playback_accounting() ->
 
 
 @pytest.mark.asyncio
-async def test_audio_end_marks_listening_after_queued_playback() -> None:
-    """Keep speaking state until all generated audio has been consumed."""
+async def test_microphone_forwarding_logs_success_and_throttles_delay_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Expose successful but slow microphone forwarding without flooding logs."""
+    conversation = _conversation()
+    session = SimpleNamespace(send_audio=AsyncMock())
+    conversation._session = session
+    monkeypatch.setattr(realtime_module, "REALTIME_AUDIO_SEND_STALL_SECONDS", 0.0)
+    frame = (24_000, np.ones(240, dtype=np.float32))
+
+    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
+        await conversation.receive(frame)
+        await conversation.receive(frame)
+
+    assert sum("Realtime microphone forwarding started" in message for message in caplog.messages) == 1
+    assert sum("Realtime microphone forwarding delayed" in message for message in caplog.messages) == 1
+    assert session.send_audio.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_audio_end_defers_listening_until_playback_tracking() -> None:
+    """Keep the listening transition ordered behind generated audio."""
     conversation = _conversation()
     movement_manager = conversation.dependencies.movement_manager
     audio = PlaybackAudio("item", 0, b"\x00\x00", np.zeros(1, dtype=np.float32))
@@ -101,15 +123,14 @@ async def test_audio_end_marks_listening_after_queued_playback() -> None:
 
     assert await conversation.emit() is audio
     movement_manager.set_speaking.assert_not_called()
+    assert await conversation.emit() is None
+    movement_manager.set_speaking.assert_not_called()
+    movement_manager.set_listening.assert_not_called()
 
-    next_audio = asyncio.create_task(conversation.emit())
-    await asyncio.sleep(0)
+    conversation.acknowledge_playback_end()
+
     movement_manager.set_speaking.assert_called_once_with(False)
     movement_manager.set_listening.assert_called_once_with(True)
-    assert not next_audio.done()
-    next_audio.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await next_audio
 
 
 @pytest.mark.asyncio

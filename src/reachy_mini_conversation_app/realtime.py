@@ -42,6 +42,8 @@ from reachy_mini_conversation_app.tools.core_tools import get_function_tools, se
 logger = logging.getLogger(__name__)
 
 OPENAI_SAMPLE_RATE = 24_000
+AUDIO_WARNING_INTERVAL_SECONDS = 60.0
+REALTIME_AUDIO_SEND_STALL_SECONDS = 1.0
 AudioSamples: TypeAlias = NDArray[np.float32] | NDArray[np.int16]
 InputAudioFrame: TypeAlias = tuple[int, AudioSamples]
 ActivityObserver: TypeAlias = Callable[[str], None]
@@ -173,6 +175,9 @@ class RealtimeConversation:
         self._bridge = StreamingAudioBridge(output_sample_rate)
         self._playback_tracker = RealtimePlaybackTracker()
         self._playback_interrupted = asyncio.Event()
+        self._microphone_forwarding_started = False
+        self._assistant_audio_received = False
+        self._last_audio_send_warning_at = float("-inf")
 
     @property
     def connected(self) -> bool:
@@ -246,6 +251,7 @@ class RealtimeConversation:
                     async for event in session:
                         await self._handle_event(event)
                 finally:
+                    self._clear_playback()
                     self.dependencies.send_image = None
                     self.dependencies.movement_manager.set_listening(False)
                     self.dependencies.movement_manager.set_speaking(False)
@@ -267,17 +273,35 @@ class RealtimeConversation:
         sample_rate, samples = frame
         pcm16 = self._bridge.microphone_to_pcm16(sample_rate, samples)
         if pcm16:
-            await session.send_audio(pcm16)
+            if not self._microphone_forwarding_started:
+                logger.info(
+                    "Realtime microphone forwarding started: input_rate=%d Hz pcm16_bytes=%d",
+                    sample_rate,
+                    len(pcm16),
+                )
+                self._microphone_forwarding_started = True
+            send_started_at = time.monotonic()
+            try:
+                await session.send_audio(pcm16)
+            except Exception:
+                logger.exception("Failed to forward microphone audio to OpenAI Realtime")
+                raise
+            send_finished_at = time.monotonic()
+            send_duration = send_finished_at - send_started_at
+            if (
+                send_duration >= REALTIME_AUDIO_SEND_STALL_SECONDS
+                and send_finished_at - self._last_audio_send_warning_at >= AUDIO_WARNING_INTERVAL_SECONDS
+            ):
+                logger.warning(
+                    "Realtime microphone forwarding delayed: send_duration=%.3fs pcm16_bytes=%d",
+                    send_duration,
+                    len(pcm16),
+                )
+                self._last_audio_send_warning_at = send_finished_at
 
-    async def emit(self) -> PlaybackAudio:
-        """Wait for the next assistant audio chunk."""
-        while True:
-            audio = await self.output_queue.get()
-            if audio is not None:
-                return audio
-            self.dependencies.movement_manager.set_speaking(False)
-            self.dependencies.movement_manager.set_listening(True)
-            self._mark_activity("listening")
+    async def emit(self) -> PlaybackAudio | None:
+        """Wait for the next assistant audio chunk or end marker."""
+        return await self.output_queue.get()
 
     async def say(self, text: str) -> None:
         """Send a text turn to the active realtime session."""
@@ -290,32 +314,49 @@ class RealtimeConversation:
         """Interrupt the response and clear pending playback."""
         session = self._session
         if session is None:
+            self._clear_playback()
             return
-        await session.interrupt()
-        self._clear_playback()
+        try:
+            await session.interrupt()
+        finally:
+            self._clear_playback()
 
     async def acknowledge_after_playback(self, audio: PlaybackAudio) -> None:
-        """Report a chunk only after its estimated robot playback duration."""
+        """Track one chunk across its estimated robot playback duration."""
+        self.dependencies.movement_manager.set_listening(False)
+        self.dependencies.movement_manager.set_speaking(True)
+        self._mark_activity("speaking")
         duration = audio.samples.size / self._bridge.output_sample_rate
         try:
             await asyncio.wait_for(self._playback_interrupted.wait(), timeout=duration)
         except asyncio.TimeoutError:
             self._playback_tracker.on_play_bytes(audio.item_id, audio.content_index, audio.source_pcm16)
 
+    def acknowledge_playback_end(self) -> None:
+        """Mark listening only after all queued assistant audio has played."""
+        self.dependencies.movement_manager.set_speaking(False)
+        self.dependencies.movement_manager.set_listening(True)
+        self._mark_activity("listening")
+
     async def _handle_event(self, event: RealtimeSessionEvent) -> None:
         if isinstance(event, RealtimeAudio):
             self._playback_interrupted.clear()
-            self.dependencies.movement_manager.set_listening(False)
-            self.dependencies.movement_manager.set_speaking(True)
+            playback_samples = self._bridge.pcm16_to_playback(event.audio.data)
             self.output_queue.put_nowait(
                 PlaybackAudio(
                     item_id=event.item_id,
                     content_index=event.content_index,
                     source_pcm16=event.audio.data,
-                    samples=self._bridge.pcm16_to_playback(event.audio.data),
+                    samples=playback_samples,
                 )
             )
-            self._mark_activity("speaking")
+            if not self._assistant_audio_received:
+                logger.info(
+                    "Realtime assistant audio received: pcm16_bytes=%d playback_samples=%d",
+                    len(event.audio.data),
+                    playback_samples.size,
+                )
+                self._assistant_audio_received = True
         elif isinstance(event, RealtimeAudioInterrupted):
             self.dependencies.movement_manager.set_speaking(False)
             self.dependencies.movement_manager.set_listening(True)

@@ -2,7 +2,7 @@ import os
 import time
 import asyncio
 import logging
-from typing import TypeVar
+from typing import TypeVar, TypeAlias
 from pathlib import Path
 from collections.abc import Callable, Coroutine
 
@@ -26,7 +26,7 @@ from reachy_mini_conversation_app.config import (
     refresh_runtime_config_from_env,
 )
 from reachy_mini_conversation_app.prompts import get_profile_instructions
-from reachy_mini_conversation_app.realtime import RealtimeConversation
+from reachy_mini_conversation_app.realtime import PlaybackAudio, RealtimeConversation
 from reachy_mini_conversation_app.startup_settings import read_startup_settings, write_startup_settings
 from reachy_mini_conversation_app.tools.core_tools import get_function_tools, selected_tool_names
 from reachy_mini_conversation_app.personality_routes import build_personality_ops, register_personality_methods
@@ -36,8 +36,12 @@ from reachy_mini_conversation_app.audio.startup_config import apply_audio_startu
 
 logger = logging.getLogger(__name__)
 ConversationFactory = Callable[[str], RealtimeConversation]
+PlaybackAcknowledgement: TypeAlias = tuple[RealtimeConversation, PlaybackAudio | None]
 ResultT = TypeVar("ResultT")
 RETRY_DELAY_SECONDS = 5.0
+MICROPHONE_FRAME_TIMEOUT_SECONDS = 5.0
+AUDIO_WARNING_INTERVAL_SECONDS = 60.0
+MICROPHONE_RETRY_DELAY_SECONDS = 0.01
 
 
 class LocalStream:
@@ -61,6 +65,7 @@ class LocalStream:
         self._conversation = conversation_factory(self._voice)
         self._stop_event = asyncio.Event()
         self._restart_requested = asyncio.Event()
+        self._playback_acknowledgements: asyncio.Queue[PlaybackAcknowledgement] = asyncio.Queue()
         self._tasks: list[asyncio.Task[None]] = []
         self._asyncio_loop: asyncio.AbstractEventLoop | None = None
         self._rpc: JsonRpcServer | None = None
@@ -311,6 +316,7 @@ class LocalStream:
                 asyncio.create_task(self._run_session_loop(), name="realtime-session"),
                 asyncio.create_task(self.record_loop(), name="audio-capture"),
                 asyncio.create_task(self.play_loop(), name="audio-playback"),
+                asyncio.create_task(self._acknowledge_playback_loop(), name="audio-playback-tracking"),
             ]
             try:
                 await asyncio.gather(*self._tasks)
@@ -342,6 +348,11 @@ class LocalStream:
                 loop.call_soon_threadsafe(task.cancel)
 
     def _clear_player(self) -> None:
+        while not self._playback_acknowledgements.empty():
+            try:
+                self._playback_acknowledgements.get_nowait()
+            except asyncio.QueueEmpty:
+                break
         audio = self._robot.media.audio
         if audio is None:
             logger.warning("Cannot clear robot playback: audio output is unavailable")
@@ -353,23 +364,98 @@ class LocalStream:
 
     async def record_loop(self) -> None:
         """Forward Reachy microphone frames to the active realtime session."""
-        sample_rate = self._robot.media.get_input_audio_samplerate()
+        try:
+            sample_rate = self._robot.media.get_input_audio_samplerate()
+        except Exception:
+            logger.exception("Failed to read the microphone sample rate")
+            raise
+        logger.info("Microphone capture loop started: sample_rate=%d Hz", sample_rate)
+        last_frame_at = time.monotonic()
+        last_warning_at = float("-inf")
+        capture_started = False
+        capture_stalled = False
         while not self._stop_event.is_set():
-            audio = self._robot.media.get_audio_sample()
-            if audio is not None and not self._mic_muted:
-                samples = np.asarray(audio, dtype=np.float32)
+            try:
+                audio = self._robot.media.get_audio_sample()
+            except Exception:
+                logger.exception("Failed to read a microphone frame")
+                raise
+            now = time.monotonic()
+            samples = None if audio is None else np.asarray(audio, dtype=np.float32)
+            if samples is None or samples.size == 0:
+                missing_duration = now - last_frame_at
+                if (
+                    missing_duration >= MICROPHONE_FRAME_TIMEOUT_SECONDS
+                    and now - last_warning_at >= AUDIO_WARNING_INTERVAL_SECONDS
+                ):
+                    logger.warning(
+                        "No usable microphone frames received for %.1fs "
+                        "(sample_rate=%d Hz, muted=%s, realtime_connected=%s); restarting robot media",
+                        missing_duration,
+                        sample_rate,
+                        self._mic_muted,
+                        self._conversation.connected,
+                    )
+                    last_warning_at = now
+                    capture_stalled = True
+                    try:
+                        await self._conversation.interrupt()
+                    except Exception as error:
+                        logger.warning("Failed to interrupt playback before robot media restart: %s", error)
+                    try:
+                        self._robot.media.stop_recording()
+                        self._robot.media.start_recording()
+                        self._robot.media.start_playing()
+                    except Exception as error:
+                        logger.warning("Failed to restart robot media after microphone stall: %s", error)
+                await asyncio.sleep(MICROPHONE_RETRY_DELAY_SECONDS)
+                continue
+            if capture_stalled:
+                logger.info("Microphone capture recovered after %.1fs without frames", now - last_frame_at)
+                capture_stalled = False
+                last_warning_at = float("-inf")
+            if not capture_started:
+                logger.info(
+                    "Microphone capture started: sample_rate=%d Hz frame_shape=%s dtype=%s peak=%.4f",
+                    sample_rate,
+                    samples.shape,
+                    samples.dtype,
+                    float(np.max(np.abs(samples))),
+                )
+                capture_started = True
+            last_frame_at = now
+            if not self._mic_muted:
                 await self._conversation.receive((sample_rate, samples))
             await asyncio.sleep(0)
 
     async def play_loop(self) -> None:
-        """Play assistant audio and report playback progress after it is heard."""
+        """Continuously queue assistant audio for robot playback."""
+        playback_started = False
         while not self._stop_event.is_set():
             conversation = self._conversation
             try:
                 audio = await asyncio.wait_for(conversation.emit(), timeout=0.5)
             except asyncio.TimeoutError:
                 continue
+            if audio is None:
+                self._playback_acknowledgements.put_nowait((conversation, None))
+                continue
             if audio.samples.size == 0:
                 continue
-            self._robot.media.push_audio_sample(audio.samples)
-            await conversation.acknowledge_after_playback(audio)
+            try:
+                self._robot.media.push_audio_sample(audio.samples)
+            except Exception:
+                logger.exception("Failed to push assistant audio to the robot player")
+                raise
+            if not playback_started:
+                logger.info("Robot audio playback started: samples=%d", audio.samples.size)
+                playback_started = True
+            self._playback_acknowledgements.put_nowait((conversation, audio))
+
+    async def _acknowledge_playback_loop(self) -> None:
+        while True:
+            conversation, audio = await self._playback_acknowledgements.get()
+            if audio is None:
+                conversation.acknowledge_playback_end()
+            else:
+                await conversation.acknowledge_after_playback(audio)
