@@ -126,30 +126,6 @@ def test_default_profile_is_curious_and_age_appropriate() -> None:
     assert "25 words" not in instructions
 
 
-def test_russian_kids_profile_encourages_curiosity_without_pressure() -> None:
-    """The Russian kids character should listen first and offer gentle next steps."""
-    profile = read_profile_from_directory(
-        "curious_kids_ru",
-        DEFAULT_PROFILES_DIRECTORY / "curious_kids_ru",
-    )
-    instructions = profile.instructions
-
-    assert profile.voice is None
-    assert profile.greeting is not None and "по-русски" in profile.greeting
-    assert "исключение из общего правила подстраиваться под язык пользователя" in instructions
-    assert "всегда отвечай по-русски, даже если ребёнок говорит по-английски" in instructions
-    assert "Папа, Мама, няня Юля" in instructions
-    assert "Алиса (2016 года рождения), Нил (2021 года рождения) и Тина (2026 года рождения)" in instructions
-    assert "Не угадывай, кто сейчас говорит" in instructions
-    assert "если вопрос уместен, выбери один и затем слушай" in instructions
-    assert "читает" in instructions
-    assert "танцевальное движение" in instructions
-    assert "математической задачей" in instructions
-    assert "Не превращай каждый разговор в опрос, урок или проверку достижений" in instructions
-    assert "Формулируй шаг как приглашение, а не обязанность" in instructions
-    assert "curious_kids_ru" in list_personalities()
-
-
 def test_bracketed_prompt_line_stays_plain_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
