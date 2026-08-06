@@ -138,6 +138,9 @@ def test_russian_kids_profile_encourages_curiosity_without_pressure() -> None:
     assert profile.greeting is not None and "по-русски" in profile.greeting
     assert "исключение из общего правила подстраиваться под язык пользователя" in instructions
     assert "всегда отвечай по-русски, даже если ребёнок говорит по-английски" in instructions
+    assert "Папа, Мама, няня Юля" in instructions
+    assert "Алиса (2016 года рождения), Нил (2021 года рождения) и Тина (2026 года рождения)" in instructions
+    assert "Не угадывай, кто сейчас говорит" in instructions
     assert "если вопрос уместен, выбери один и затем слушай" in instructions
     assert "читает" in instructions
     assert "танцевальное движение" in instructions
