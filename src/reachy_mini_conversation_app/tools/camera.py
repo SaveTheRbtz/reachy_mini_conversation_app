@@ -1,56 +1,39 @@
-import base64
 import logging
-from typing import Any, Dict
 
-from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies
+from agents import FunctionTool, RunContextWrapper, function_tool
+
+from reachy_mini_conversation_app.tools.types import ToolResult, ToolDependencies
 
 
 logger = logging.getLogger(__name__)
 
 
-class Camera(Tool):
-    """Take a picture with the camera to see what is in front of the robot."""
-
-    name = "camera"
-    description = (
-        "Take a picture with the camera to see what is in front of the robot. "
-        "Use this when the user asks you to look at something, see what they are holding, "
-        "check their appearance, describe the scene, or comment on how they look. "
-        "Also use it when the user asks what you can see or wants your visual opinion. "
-        "The camera is live, each call captures the current moment. "
-        "If the user asks you to look without saying at what, do not ask for clarification, call this tool and describe what you see. "
-    )
-    parameters_schema = {
-        "type": "object",
-        "properties": {
-            "question": {
-                "type": "string",
-                "description": (
-                    "What to observe or ask about in the picture. "
-                    "Examples: what is the user holding, describe the user's outfit, "
-                    "what do you see around you, how does the user look today."
-                ),
-            },
-        },
-        "required": ["question"],
-    }
-
-    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
-        """Take a picture with the camera and return the base64-encoded JPEG."""
-        question = (kwargs.get("question") or "").strip()
-        if not question:
-            logger.warning("camera: empty question")
-            return {"error": "question must be a non-empty string"}
-
-        logger.info("Tool call: camera question=%s", question[:120])
-
-        if not deps.camera_enabled:
-            logger.error("Camera is disabled")
-            return {"error": "Camera is disabled"}
-
-        jpeg_bytes = deps.reachy_mini.media.get_frame_jpeg()
+@function_tool(
+    name_override="camera",
+    description_override=(
+        "Capture the current camera view when the user asks what you see, asks about their appearance, "
+        "or wants you to inspect something in front of the robot."
+    ),
+)
+async def camera_tool(context: RunContextWrapper[ToolDependencies], question: str) -> ToolResult:
+    """Capture and submit the current camera frame."""
+    if not question.strip():
+        return {"error": "question must be a non-empty string"}
+    dependencies = context.context
+    if not dependencies.camera_enabled:
+        return {"error": "Camera is disabled"}
+    if dependencies.send_image is None:
+        return {"error": "Camera input is unavailable before the realtime session starts"}
+    try:
+        jpeg_bytes = dependencies.reachy_mini.media.get_frame_jpeg()
         if jpeg_bytes is None:
-            logger.error("No frame available from camera")
             return {"error": "No frame available"}
+        await dependencies.send_image(question.strip(), jpeg_bytes)
+        logger.info("Submitted a camera frame for question=%s", question[:120])
+        return {"status": "image submitted", "question": question.strip()}
+    except Exception as error:
+        logger.exception("Camera capture failed")
+        return {"error": f"Camera capture failed: {type(error).__name__}: {error}"}
 
-        return {"b64_im": base64.b64encode(jpeg_bytes).decode("utf-8")}
+
+camera: FunctionTool = camera_tool

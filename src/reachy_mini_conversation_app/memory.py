@@ -1,212 +1,239 @@
-from __future__ import annotations
 import os
+import re
+import html
 import json
 import time
-import random
-import string
 import logging
+import secrets
 import threading
+from typing import Literal
 from pathlib import Path
-from dataclasses import dataclass
-from collections.abc import Mapping
+from dataclasses import field, dataclass
 
 
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
-MAX_FACTS = 60
-MAX_FACT_CHARS = 280
+MAX_MEMORY_NOTES = 20
+MAX_MEMORY_CHARS = 280
 MEMORY_FILENAME = "memory.v1.json"
 
-_STORE_LOCK = threading.Lock()
+_SENSITIVE_PATTERN = re.compile(
+    r"\b(?:password(?!\s+manager\b)|passcode|api[ -]?key|access token|secret key|credit card|debit card|cvv|"
+    r"bank account|routing number|social security|ssn|passport number|driver'?s license|"
+    r"medical record|diagnos(?:is|ed)|health condition|medication|prescription|diabet(?:es|ic)|cancer|"
+    r"hypertension|asthma|allerg(?:y|ies)|pregnan(?:t|cy))\b",
+    re.IGNORECASE,
+)
+_SECRET_VALUE_PATTERN = re.compile(
+    r"\bsk-[a-zA-Z0-9_-]{12,}\b|\b\d{3}-\d{2}-\d{4}\b|(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)"
+)
+_MEMORY_ID_PATTERN = re.compile(r"m_[a-zA-Z0-9_-]{1,64}\Z")
+_INSTRUCTION_PATTERN = re.compile(
+    r"\b(?:ignore|disregard|override)\b.{0,40}\b(?:instruction|prompt|policy|rule)s?\b|"
+    r"\b(?:system|developer)\s+(?:message|prompt|instruction)s?\b|"
+    r"\b(?:obey|follow)\b.{0,64}\b(?:note|memory|instruction|prompt|policy|rule|request|message)s?\b|"
+    r"\bfrom now on\b.{0,80}\b(?:answer|respond|reply|say|act|behave|do|call|use|obey|follow|ignore)\b|"
+    r"\b(?:always|never)\s+(?:answer|respond|reply|say|call|use|obey|follow|ignore)\b|"
+    r"\b(?:answer|respond|reply)\b.{0,50}\b(?:every|all)\b.{0,30}\b(?:question|request|message)s?\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
-class MemoryFact:
-    """One short long-term memory fact."""
+class MemoryNote:
+    """One durable, user-authored memory note."""
 
     id: str
     text: str
-    created_at: int
 
     def to_json(self) -> dict[str, object]:
-        """Return the persisted JSON shape used by the mobile app."""
+        """Return the persisted memory-store shape."""
         return {
             "id": self.id,
             "text": self.text,
-            "createdAt": self.created_at,
         }
 
 
 @dataclass(frozen=True)
-class ForgetMemoryResult:
-    """Result of removing a memory fact."""
+class MemoryChange:
+    """Describe the result of a memory write."""
 
-    removed: MemoryFact | None
-    candidates: tuple[MemoryFact, ...]
+    note: MemoryNote
+    status: Literal["saved", "updated", "unchanged"]
 
 
 def memory_path_for_instance(instance_path: str | Path | None = None) -> Path:
-    """Return the memory JSON path for this app instance."""
+    """Return the durable memory path for this app instance."""
     if instance_path is not None:
         return Path(instance_path).expanduser() / MEMORY_FILENAME
-
     data_home = os.getenv("XDG_DATA_HOME")
     data_root = Path(data_home).expanduser() if data_home else Path.home() / ".local" / "share"
     return data_root / "reachy_mini_conversation_app" / MEMORY_FILENAME
 
 
-def normalize_memory_text(text: str) -> str:
-    """Collapse whitespace and enforce the fact length cap."""
+def _validated_memory_text(text: str) -> str:
+    if len(text) > MAX_MEMORY_CHARS:
+        raise ValueError(f"memory must be at most {MAX_MEMORY_CHARS} characters")
     normalized = " ".join(text.split()).strip()
-    if len(normalized) <= MAX_FACT_CHARS:
-        return normalized
-    return f"{normalized[: MAX_FACT_CHARS - 3]}..."
+    if not normalized:
+        raise ValueError("memory must be a non-empty fact")
+    if _SENSITIVE_PATTERN.search(normalized) or _SECRET_VALUE_PATTERN.search(normalized):
+        raise ValueError("sensitive identifiers and secrets cannot be stored")
+    if _INSTRUCTION_PATTERN.search(normalized):
+        raise ValueError("instructions and policy overrides cannot be stored as memories")
+    return normalized
 
 
-def _make_id() -> str:
-    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
-    return f"m_{int(time.time() * 1000)}_{suffix}"
+def _validated_memory_id(memory_id: str) -> str:
+    if _MEMORY_ID_PATTERN.fullmatch(memory_id) is None:
+        raise ValueError("invalid memory id")
+    return memory_id
 
 
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+def _new_memory_id() -> str:
+    return f"m_{int(time.time() * 1000)}_{secrets.token_hex(3)}"
 
 
-def _fact_from_json(value: object) -> MemoryFact | None:
-    if not isinstance(value, Mapping):
+def _memory_note_from_json(value: object) -> MemoryNote | None:
+    if not isinstance(value, dict):
         return None
-
-    fact_id = value.get("id")
+    memory_id = value.get("id")
     text = value.get("text")
-    created_at = value.get("createdAt")
-
-    if not isinstance(fact_id, str):
+    if not isinstance(memory_id, str) or not isinstance(text, str):
         return None
-    if not isinstance(text, str):
-        return None
-    if not isinstance(created_at, (int, float)):
-        return None
-
-    normalized = normalize_memory_text(text)
-    if not normalized:
-        return None
-
-    return MemoryFact(id=fact_id, text=normalized, created_at=int(created_at))
-
-
-def _read_memory_file(path: Path) -> list[MemoryFact]:
     try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        logger.warning("Failed to read memory store at %s: %s", path, exc)
-        return []
-
+        _validated_memory_id(memory_id)
+    except ValueError:
+        logger.warning("Ignoring memory with an invalid id")
+        return None
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        logger.warning("Failed to parse memory store at %s: %s", path, exc)
-        return []
-
-    if not isinstance(parsed, Mapping):
-        return []
-
-    facts_value = parsed.get("facts")
-    if not isinstance(facts_value, list):
-        return []
-
-    facts: list[MemoryFact] = []
-    for item in facts_value:
-        fact = _fact_from_json(item)
-        if fact is not None:
-            facts.append(fact)
-    return facts[:MAX_FACTS]
+        normalized = _validated_memory_text(text)
+    except ValueError as error:
+        logger.warning("Ignoring unsafe memory %s: %s", memory_id, error)
+        return None
+    return MemoryNote(id=memory_id, text=normalized)
 
 
-def _write_memory_file(path: Path, facts: list[MemoryFact]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "version": SCHEMA_VERSION,
-        "facts": [fact.to_json() for fact in facts[:MAX_FACTS]],
-    }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp_path.replace(path)
-    finally:
+@dataclass
+class MemoryState:
+    """Local-first memory state shared through the Agents SDK run context."""
+
+    path: Path | None = None
+    notes: list[MemoryNote] = field(default_factory=list)
+    revision: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    @classmethod
+    def load(cls, instance_path: str | Path | None = None) -> "MemoryState":
+        """Load a bounded memory state for an app instance."""
+        path = memory_path_for_instance(instance_path)
         try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+            payload: object = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return cls(path=path)
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            logger.warning("Failed to load memory state from %s: %s", path, error)
+            return cls(path=path)
+        if not isinstance(payload, dict) or payload.get("version") != SCHEMA_VERSION:
+            logger.warning("Ignoring unsupported memory state at %s", path)
+            return cls(path=path)
+        raw_notes = payload.get("facts")
+        if not isinstance(raw_notes, list):
+            logger.warning("Ignoring invalid memory state at %s", path)
+            return cls(path=path)
+        notes: list[MemoryNote] = []
+        seen_ids: set[str] = set()
+        seen_texts: set[str] = set()
+        for raw_note in raw_notes:
+            note = _memory_note_from_json(raw_note)
+            normalized_text = note.text.casefold() if note is not None else ""
+            if note is not None and note.id not in seen_ids and normalized_text not in seen_texts:
+                notes.append(note)
+                seen_ids.add(note.id)
+                seen_texts.add(normalized_text)
+                if len(notes) == MAX_MEMORY_NOTES:
+                    break
+        return cls(path=path, notes=notes)
 
+    def remember(self, fact: str, *, replaces_memory_id: str | None = None) -> MemoryChange:
+        """Persist one explicit durable fact, optionally replacing an old note."""
+        normalized = _validated_memory_text(fact)
+        if replaces_memory_id is not None:
+            _validated_memory_id(replaces_memory_id)
+        with self._lock:
+            replaced = next((note for note in self.notes if note.id == replaces_memory_id), None)
+            if replaces_memory_id is not None and replaced is None:
+                raise ValueError(f"unknown memory id: {replaces_memory_id}")
+            existing = next((note for note in self.notes if note.text.casefold() == normalized.casefold()), None)
+            if replaces_memory_id is None and existing is not None:
+                return MemoryChange(note=existing, status="unchanged")
+            if replaced is not None and replaced.text == normalized:
+                return MemoryChange(note=replaced, status="unchanged")
 
-def list_memory_facts(instance_path: str | Path | None = None) -> list[MemoryFact]:
-    """Return stored memory facts, newest first."""
-    with _STORE_LOCK:
-        return list(_read_memory_file(memory_path_for_instance(instance_path)))
+            note = MemoryNote(id=_new_memory_id(), text=normalized)
+            previous_notes = self.notes
+            if replaces_memory_id is None:
+                self.notes = [note, *self.notes][:MAX_MEMORY_NOTES]
+                status: Literal["saved", "updated"] = "saved"
+            else:
+                removed_ids = {replaces_memory_id}
+                if existing is not None:
+                    removed_ids.add(existing.id)
+                self.notes = [
+                    note,
+                    *(saved_note for saved_note in self.notes if saved_note.id not in removed_ids),
+                ][:MAX_MEMORY_NOTES]
+                status = "updated"
+            try:
+                self._persist()
+            except OSError:
+                self.notes = previous_notes
+                raise
+            self.revision += 1
+            return MemoryChange(note=note, status=status)
 
+    def forget(self, memory_id: str) -> MemoryNote | None:
+        """Remove one memory by its exact injected identifier."""
+        _validated_memory_id(memory_id)
+        with self._lock:
+            removed = next((note for note in self.notes if note.id == memory_id), None)
+            if removed is None:
+                return None
+            previous_notes = self.notes
+            self.notes = [note for note in self.notes if note.id != memory_id]
+            try:
+                self._persist()
+            except OSError:
+                self.notes = previous_notes
+                raise
+            self.revision += 1
+            return removed
 
-def add_memory_fact(instance_path: str | Path | None, text: str) -> MemoryFact | None:
-    """Store one short fact, deduplicating exact case-insensitive matches."""
-    normalized = normalize_memory_text(text)
-    if not normalized:
-        return None
+    def render_for_instructions(self) -> str:
+        """Render bounded, escaped memory notes for dynamic instructions."""
+        with self._lock:
+            if not self.notes:
+                return "- (none)"
+            return "\n".join(f"- [{note.id}] {html.escape(note.text, quote=False)}" for note in self.notes)
 
-    path = memory_path_for_instance(instance_path)
-    with _STORE_LOCK:
-        facts = _read_memory_file(path)
-        existing = next((fact for fact in facts if fact.text.lower() == normalized.lower()), None)
-        if existing is not None:
-            return existing
-
-        fact = MemoryFact(id=_make_id(), text=normalized, created_at=_now_ms())
-        _write_memory_file(path, [fact, *facts][:MAX_FACTS])
-        return fact
-
-
-def forget_memory_fact(
-    instance_path: str | Path | None,
-    *,
-    query: str | None = None,
-) -> ForgetMemoryResult:
-    """Remove a fact by case-insensitive substring query."""
-    path = memory_path_for_instance(instance_path)
-    with _STORE_LOCK:
-        facts = _read_memory_file(path)
-
-        normalized_query = normalize_memory_text(query or "").lower()
-        if not normalized_query:
-            return ForgetMemoryResult(removed=None, candidates=())
-
-        candidates = tuple(fact for fact in facts if normalized_query in fact.text.lower())
-        if not candidates:
-            return ForgetMemoryResult(removed=None, candidates=())
-
-        removed = candidates[0]
-        _write_memory_file(path, [fact for fact in facts if fact.id != removed.id])
-        return ForgetMemoryResult(removed=removed, candidates=candidates)
-
-
-def clear_memory_facts(instance_path: str | Path | None = None) -> None:
-    """Remove all stored memory facts."""
-    path = memory_path_for_instance(instance_path)
-    with _STORE_LOCK:
-        _write_memory_file(path, [])
-
-
-def format_memory_for_prompt(instance_path: str | Path | None = None) -> str:
-    """Return the prompt fragment injected before the session instructions."""
-    facts = list_memory_facts(instance_path)
-    if not facts:
-        return ""
-
-    bullets = "\n".join(f"- {fact.text}" for fact in facts)
-    return "\n".join(
-        [
-            "Things you remember about the user (use this context naturally,",
-            "do not recite the list verbatim):",
-            bullets,
-        ]
-    )
+    def _persist(self) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": SCHEMA_VERSION,
+            "facts": [note.to_json() for note in self.notes],
+        }
+        temporary_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.{secrets.token_hex(3)}.tmp")
+        try:
+            temporary_path.write_text(
+                f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n",
+                encoding="utf-8",
+            )
+            temporary_path.replace(self.path)
+        finally:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError as error:
+                logger.warning("Failed to remove temporary memory file %s: %s", temporary_path, error)

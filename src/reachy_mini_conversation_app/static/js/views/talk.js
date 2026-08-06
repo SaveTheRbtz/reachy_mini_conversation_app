@@ -14,7 +14,7 @@ import { h, prettifyProfileName } from "../ui.js";
 const CAPTION_BY_STATE = Object.freeze({
   [ORB_STATES.MUTED]: "Muted",
   [ORB_STATES.IDLE]: "Ready",
-  [ORB_STATES.CONNECTING]: "Connecting to the backend...",
+  [ORB_STATES.CONNECTING]: "Connecting to OpenAI Realtime...",
   [ORB_STATES.LISTENING]: "Listening",
   [ORB_STATES.THINKING]: "Thinking",
   [ORB_STATES.SPEAKING]: "Speaking",

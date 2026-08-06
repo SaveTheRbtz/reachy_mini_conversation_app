@@ -1,35 +1,26 @@
 import logging
-from typing import Any, Dict
 
-from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies
+from agents import FunctionTool, RunContextWrapper, function_tool
+
+from reachy_mini_conversation_app.tools.types import ToolResult, ToolDependencies
 
 
 logger = logging.getLogger(__name__)
 
 
-class HeadTracking(Tool):
-    """Enable or disable following the user's face with the head."""
+@function_tool(
+    name_override="head_tracking",
+    description_override="Enable or disable following the user's face with the robot's head.",
+)
+async def head_tracking_tool(context: RunContextWrapper[ToolDependencies], enabled: bool) -> ToolResult:
+    """Toggle head tracking."""
+    try:
+        context.context.movement_manager.set_head_tracking(enabled)
+    except Exception as error:
+        logger.exception("Head tracking update failed")
+        return {"error": f"Head tracking failed: {type(error).__name__}: {error}"}
+    logger.info("Head tracking enabled=%s", enabled)
+    return {"status": "following" if enabled else "stopped following"}
 
-    name = "head_tracking"
-    description = (
-        "Enable or disable following the user's face with the head. "
-        "Use when asked to follow, keep looking at, or stop following the user."
-    )
-    needs_response = False
-    parameters_schema = {
-        "type": "object",
-        "properties": {
-            "enabled": {
-                "type": "boolean",
-                "description": "True to start following the user's face, false to stop.",
-            },
-        },
-        "required": ["enabled"],
-    }
 
-    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
-        """Toggle head tracking."""
-        enabled = bool(kwargs.get("enabled", True))
-        logger.info("Tool call: head_tracking enabled=%s", enabled)
-        deps.movement_manager.set_head_tracking(enabled)
-        return {"status": "following" if enabled else "stopped following"}
+head_tracking: FunctionTool = head_tracking_tool

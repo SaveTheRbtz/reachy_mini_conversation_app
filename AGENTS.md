@@ -27,7 +27,7 @@ Everything below expands these.
 The bar we hold, and the *why* behind the rules:
 
 - **Built on the Reachy Mini SDK.** This app runs on top of [`reachy_mini`](https://github.com/pollen-robotics/reachy_mini) (declared in `pyproject.toml`, locked in `uv.lock`, installed alongside it). Build on the SDK's public API. Don't fork, vendor, or monkey-patch its internals, and keep the app working when the SDK version bumps.
-- **Design before code.** Think non-trivial changes through and state the trade-offs. The realtime conversation loop lives in `huggingface_realtime.py`; keep shared behaviour there.
+- **Design before code.** Think non-trivial changes through and state the trade-offs. The OpenAI Realtime conversation loop and audio bridge live in `realtime.py`; keep shared behaviour there.
 - **Graceful degradation.** A tool returns `{"error": ...}` rather than crashing the conversation loop.
 - **Tests cover essential behavior**, not every line.
 - **The CI gate is the floor, not the ceiling.** Never degrade quality to land faster.
@@ -94,19 +94,21 @@ These are the cleanups we make in review over and over. Write code that wouldn't
 ```
 src/reachy_mini_conversation_app/
   main.py                 # entry point + CLI (reachy-mini-conversation-app)
-  huggingface_realtime.py # Hugging Face backend + shared realtime conversation loop
-  conversation_handler.py # wires audio/tools/backend together
+  realtime.py             # Agents SDK session + audio bridge
+  mcp_servers.py          # fixed public MCP server catalog
   config.py               # configuration + env loading
+  memory.py               # typed context state + local persistence
+  prompts.py              # profile + dynamic memory instructions
   personality.py          # personality/profile loading
   tools/                  # LLM-callable tools (one file per tool)
-  audio/, memory/, sounds/, static/
+  audio/, static/
 profiles/                 # bundled personalities (one dir per profile)
 tests/                    # pytest suite, mirrors the src layout
 ```
 
 Architecture overview: [`README.md`](README.md#architecture).
 
-- **Adding a tool:** subclass `Tool` from `tools/core_tools.py` in its own file under `tools/`. Define `name`, `description`, `parameters_schema`, and an async `__call__(self, deps: ToolDependencies, **kwargs)` returning a `dict`. Return `{"error": ...}` on failure instead of raising into the loop. Copy an existing tool such as `tools/move_head.py`.
+- **Adding a tool:** define an Agents SDK `@function_tool` in its own module under `tools/`, with an explicit `RunContextWrapper[ToolDependencies]` parameter and typed return value. Register the resulting `FunctionTool` in `tools/core_tools.py`. Return `{"error": ...}` on failure instead of raising into the loop. Copy an existing tool such as `tools/move_head.py`.
 - **Adding a personality:** add a directory under `profiles/`, following an existing one (e.g. `profiles/default/`).
 
 ## Commands

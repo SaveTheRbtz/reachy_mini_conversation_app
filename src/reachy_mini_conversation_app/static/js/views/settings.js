@@ -1,4 +1,4 @@
-/** Settings view: Hugging Face connection, voice, and runtime status. */
+/** Settings view for the OpenAI Realtime connection and voice. */
 
 import {
   applyVoice,
@@ -6,49 +6,33 @@ import {
   getCurrentVoice,
   getStatus,
   listVoices,
-  saveBackendConfig,
+  saveOpenAIConfig,
   untilReady,
 } from "../api.js";
 import { h } from "../ui.js";
 
-const HF_CONNECTION_MODES = Object.freeze({
-  DEPLOYED: "deployed",
-  LOCAL: "local",
-});
-
-const DEFAULT_HF_HOST = "localhost";
-const DEFAULT_HF_PORT = 8765;
-
-const HF_MODE_HINTS = Object.freeze({
-  [HF_CONNECTION_MODES.DEPLOYED]: "Uses the hosted Hugging Face backend. No API key required.",
-  [HF_CONNECTION_MODES.LOCAL]: "Connects directly to the host and port below.",
-});
-
 export async function mountSettingsView({ outlet, signal }) {
   const connectionSection = buildConnectionSection({
-    onSaved: () =>
-      Promise.all([
-        refreshStatus({ statusSection, connectionSection, signal }),
-        refreshVoices({ voiceSection, signal }),
-      ]),
+    onSaved: () => refreshStatus({ statusSection, connectionSection, signal }),
   });
   const voiceSection = buildVoiceSection();
   const statusSection = buildStatusSection();
 
-  const view = h(
-    "section",
-    { class: "view view--settings" },
+  outlet.replaceChildren(
     h(
-      "header",
-      { class: "view-header" },
-      h("h1", { class: "view-title" }, "Settings"),
-      h("p", { class: "view-subtitle" }, "Connection, voice, and runtime state for Reachy Mini.")
-    ),
-    connectionSection.element,
-    voiceSection.element,
-    statusSection.element
+      "section",
+      { class: "view view--settings" },
+      h(
+        "header",
+        { class: "view-header" },
+        h("h1", { class: "view-title" }, "Settings"),
+        h("p", { class: "view-subtitle" }, "OpenAI Realtime connection, voice, and session state.")
+      ),
+      connectionSection.element,
+      voiceSection.element,
+      statusSection.element
+    )
   );
-  outlet.replaceChildren(view);
 
   await Promise.all([
     refreshStatus({ statusSection, connectionSection, signal }),
@@ -57,65 +41,32 @@ export async function mountSettingsView({ outlet, signal }) {
 }
 
 function buildConnectionSection({ onSaved } = {}) {
-  const hfModeSelect = h(
-    "select",
-    { class: "settings-select", name: "hf_mode" },
-    h("option", { value: HF_CONNECTION_MODES.DEPLOYED }, "Hosted"),
-    h("option", { value: HF_CONNECTION_MODES.LOCAL }, "Local")
-  );
-  const hfHostInput = h("input", {
-    type: "text",
-    name: "hf_host",
+  const apiKey = h("input", {
+    type: "password",
+    name: "api_key",
     autocomplete: "off",
-    placeholder: DEFAULT_HF_HOST,
-    value: DEFAULT_HF_HOST,
+    placeholder: "sk-…",
     class: "settings-input",
   });
-  const hfPortInput = h("input", {
-    type: "number",
-    name: "hf_port",
-    min: "1",
-    max: "65535",
-    step: "1",
-    inputmode: "numeric",
-    value: String(DEFAULT_HF_PORT),
-    class: "settings-input",
-  });
-  const hfLocalFields = h(
-    "div",
-    { class: "settings-field-row", "data-role": "hf-local-fields" },
-    h(
-      "label",
-      { class: "settings-field" },
-      h("span", { class: "settings-label" }, "Host/IP"),
-      hfHostInput
-    ),
-    h(
-      "label",
-      { class: "settings-field" },
-      h("span", { class: "settings-label" }, "Port"),
-      hfPortInput
-    )
-  );
-  const hint = h("p", { class: "settings-hint" }, "");
   const status = h("p", { class: "settings-status", role: "status", "aria-live": "polite" });
-  const submitButton = h("button", { type: "submit", class: "btn btn--primary" }, "Save connection");
-
+  const submitButton = h("button", { type: "submit", class: "btn btn--primary" }, "Save API key");
   const form = h(
     "form",
     { class: "settings-form" },
     h(
       "label",
       { class: "settings-field" },
-      h("span", { class: "settings-label" }, "Hugging Face connection"),
-      hfModeSelect
+      h("span", { class: "settings-label" }, "OpenAI API key"),
+      apiKey
     ),
-    hfLocalFields,
-    hint,
+    h(
+      "p",
+      { class: "settings-hint" },
+      "Stored in the app instance .env file. The current key is never returned to the browser."
+    ),
     h("div", { class: "settings-actions" }, submitButton),
     status
   );
-
   const element = h(
     "section",
     { class: "settings-section" },
@@ -123,66 +74,33 @@ function buildConnectionSection({ onSaved } = {}) {
     form
   );
 
-  function syncLocalFields() {
-    const isLocal = hfModeSelect.value === HF_CONNECTION_MODES.LOCAL;
-    hfLocalFields.style.display = isLocal ? "" : "none";
-    hfHostInput.disabled = !isLocal;
-    hfPortInput.disabled = !isLocal;
-    hfHostInput.required = isLocal;
-    hfPortInput.required = isLocal;
-    hint.textContent = HF_MODE_HINTS[hfModeSelect.value] || "";
-  }
-
-  hfModeSelect.addEventListener("change", syncLocalFields);
-
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (submitButton.disabled) return;
+    if (submitButton.disabled || !apiKey.value.trim()) return;
     submitButton.disabled = true;
-    hfModeSelect.disabled = true;
-    hfHostInput.disabled = true;
-    hfPortInput.disabled = true;
+    apiKey.disabled = true;
     form.setAttribute("aria-busy", "true");
     status.classList.remove("is-error");
-    status.textContent = "Saving…";
+    status.textContent = "Saving and reconnecting…";
     try {
-      const payload = { hf_mode: hfModeSelect.value };
-      if (hfModeSelect.value === HF_CONNECTION_MODES.LOCAL) {
-        payload.hf_host = hfHostInput.value.trim();
-        if (hfPortInput.value) {
-          payload.hf_port = Number.parseInt(hfPortInput.value, 10);
-        }
-      }
-      const result = await saveBackendConfig(payload);
-      status.textContent =
-        result?.message || (result?.requires_restart ? "Saved. Restart the app to apply." : "Saved.");
+      await saveOpenAIConfig(apiKey.value);
+      apiKey.value = "";
+      status.textContent = "Saved. The Realtime session is reconnecting.";
       await onSaved?.();
     } catch (error) {
       status.textContent = `Failed to save: ${describeError(error)}`;
       status.classList.add("is-error");
     } finally {
       submitButton.disabled = false;
-      hfModeSelect.disabled = false;
-      syncLocalFields();
+      apiKey.disabled = false;
       form.removeAttribute("aria-busy");
     }
   });
 
-  syncLocalFields();
-
   return {
     element,
     syncFromStatus(payload) {
-      if (Object.values(HF_CONNECTION_MODES).includes(payload?.hf_connection_mode)) {
-        hfModeSelect.value = payload.hf_connection_mode;
-      }
-      if (payload?.hf_direct_host) {
-        hfHostInput.value = payload.hf_direct_host;
-      }
-      if (payload?.hf_direct_port != null) {
-        hfPortInput.value = String(payload.hf_direct_port);
-      }
-      syncLocalFields();
+      apiKey.placeholder = payload?.has_key ? "Configured" : "sk-…";
     },
   };
 }
@@ -206,7 +124,6 @@ function buildVoiceSection() {
     h("div", { class: "settings-actions" }, submitButton),
     status
   );
-
   const element = h(
     "section",
     { class: "settings-section" },
@@ -246,10 +163,10 @@ function buildVoiceSection() {
         status.textContent = "Voices are unavailable right now.";
         return;
       }
-      for (const v of voices) {
-        const opt = h("option", { value: v }, v);
-        if (v === current) opt.selected = true;
-        select.appendChild(opt);
+      for (const voice of voices) {
+        const option = h("option", { value: voice }, voice);
+        if (voice === current) option.selected = true;
+        select.appendChild(option);
       }
       select.disabled = false;
       submitButton.disabled = false;
@@ -259,11 +176,7 @@ function buildVoiceSection() {
 }
 
 function buildStatusSection() {
-  const list = h(
-    "dl",
-    { class: "settings-status-grid" },
-    statusRow("Backend", "Loading…")
-  );
+  const list = h("dl", { class: "settings-status-grid" }, statusRow("Realtime", "Loading…"));
   const element = h(
     "section",
     { class: "settings-section" },
@@ -274,45 +187,26 @@ function buildStatusSection() {
   return {
     element,
     render(payload) {
-      list.replaceChildren();
-      list.appendChild(statusRow("HF connection", formatHfMode(payload.hf_connection_mode)));
-      if (payload.hf_connection_mode === HF_CONNECTION_MODES.LOCAL) {
-        list.appendChild(statusRow("HF target", formatHfTarget(payload)));
-      }
-      list.appendChild(
-        statusRow(
-          "Configuration",
-          payload.has_hf_connection ? "Ready" : "Missing",
-          payload.has_hf_connection ? "ok" : "warn"
-        )
-      );
-      const backendState = payload.backend_connected
-        ? "connected"
-        : payload.backend_connection_state || "not_started";
-      const backendLabels = {
+      const state = payload.connected ? "connected" : payload.connection_state || "not_started";
+      const labels = {
         connected: "Connected",
         connecting: "Connecting…",
         disconnected: "Disconnected",
         not_started: "Not started",
-        restart_required: "Restart required",
-        waiting_for_config: "Waiting for configuration",
+        waiting_for_config: "Waiting for API key",
       };
-      list.appendChild(
-        statusRow(
-          "Backend",
-          backendLabels[backendState] || "Unavailable",
-          backendState === "connected" ? "ok" : backendState === "not_started" ? undefined : "warn"
-        )
+      list.replaceChildren(
+        statusRow("API key", payload.has_key ? "Configured" : "Missing", payload.has_key ? "ok" : "warn"),
+        statusRow("Model", payload.model || "-"),
+        statusRow("Voice", payload.voice || "-"),
+        statusRow("Realtime", labels[state] || "Unavailable", state === "connected" ? "ok" : "warn")
       );
-      if (payload.backend_error) {
-        list.appendChild(statusRow("Backend error", payload.backend_error, "warn"));
-      }
-      if (payload.requires_restart) {
-        list.appendChild(statusRow("Restart", "Required to apply changes", "warn"));
+      if (payload.connection_error) {
+        list.appendChild(statusRow("Connection error", payload.connection_error, "warn"));
       }
     },
     renderUnavailable(error) {
-      list.replaceChildren(statusRow("Backend", `Unavailable: ${describeError(error)}`, "warn"));
+      list.replaceChildren(statusRow("Realtime", `Unavailable: ${describeError(error)}`, "warn"));
     },
   };
 }
@@ -326,19 +220,6 @@ function statusRow(label, value, tone) {
   );
 }
 
-function formatHfMode(mode) {
-  if (mode === HF_CONNECTION_MODES.LOCAL) return "Local";
-  if (mode === HF_CONNECTION_MODES.DEPLOYED) return "Hosted";
-  return "-";
-}
-
-function formatHfTarget(payload) {
-  const host = payload?.hf_direct_host;
-  const port = payload?.hf_direct_port;
-  if (!host) return "-";
-  return `${host}:${port || DEFAULT_HF_PORT}`;
-}
-
 async function refreshStatus({ statusSection, connectionSection, signal }) {
   try {
     const payload = await untilReady(getStatus, signal);
@@ -346,8 +227,7 @@ async function refreshStatus({ statusSection, connectionSection, signal }) {
     statusSection.render(payload);
     connectionSection.syncFromStatus(payload);
   } catch (error) {
-    if (signal.aborted) return;
-    statusSection.renderUnavailable(error);
+    if (!signal.aborted) statusSection.renderUnavailable(error);
   }
 }
 
@@ -356,16 +236,9 @@ async function refreshVoices({ voiceSection, signal }) {
   let current = "";
   try {
     voices = await untilReady(listVoices, signal);
+    current = (await getCurrentVoice())?.voice || "";
   } catch {
     voices = [];
   }
-  if (signal.aborted) return;
-  try {
-    const data = await getCurrentVoice();
-    current = data?.voice || "";
-  } catch {
-    current = "";
-  }
-  if (signal.aborted) return;
-  voiceSection.setOptions(voices, current);
+  if (!signal.aborted) voiceSection.setOptions(voices, current);
 }

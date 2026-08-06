@@ -6,32 +6,30 @@
 import { h } from "./ui.js";
 import { GLOW_BY_STATE, ORB_STATES } from "./constants.js";
 
-/** Map a backend activity reason to a visual state; null means keep current. */
+/** Map a realtime activity reason to a visual state; null means keep current. */
 export function mapActivityToState(reason) {
   switch (reason) {
-    case "user_speech_started":
-    case "user_transcription_delta":
+    case "listening":
       return ORB_STATES.LISTENING;
 
-    case "user_speech_stopped":
-    case "user_transcription_completed":
-    case "response_created":
-    case "tool_call_received":
-    case "tool_result_ready":
+    case "thinking":
       return ORB_STATES.THINKING;
 
-    case "assistant_audio_delta":
+    case "speaking":
       return ORB_STATES.SPEAKING;
 
-    case "assistant_transcript_done":
+    case "connected":
       return ORB_STATES.IDLE;
+
+    case "disconnected":
+      return ORB_STATES.ERROR;
 
     default:
       return null;
   }
 }
 
-// The backend never emits an explicit idle event; this timeout returns the orb to idle.
+// A quiet session has no idle event, so this timeout returns the orb to idle.
 const IDLE_FALLBACK_MS = 1500;
 
 /** Build the orb DOM. Returns { root, setState, dispose }. */

@@ -40,7 +40,7 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
     h(
       "p",
       { class: "settings-hint settings-section-intro" },
-      "Choose exactly what each personality can use. Installed Tool Spaces stay off until selected."
+      "Choose exactly which robot actions and public MCP tools each personality can use."
     ),
     h(
       "label",
@@ -130,12 +130,9 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
     const enabled = new Set(payload.enabled_tools || []);
     const groups = new Map();
     for (const tool of payload.available_tools || []) {
-      const key = tool.kind === "tool_space" ? `space:${tool.source}` : tool.kind;
+      const key = tool.kind;
       if (!groups.has(key)) {
-        const sourceName = prettifyProfileName(tool.source.split("/").at(-1));
-        let title = `Tool Space · ${sourceName}`;
-        if (tool.kind === "shared") title = "Built-in tools";
-        if (tool.kind === "external") title = "External tools";
+        const title = tool.kind === "mcp" ? "Public information" : "Robot tools";
         groups.set(key, {
           title,
           tools: [],

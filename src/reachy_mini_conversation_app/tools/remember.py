@@ -1,48 +1,37 @@
 import logging
-from typing import Any
 
-from reachy_mini_conversation_app.memory import add_memory_fact
-from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies
+from agents import FunctionTool, RunContextWrapper, function_tool
+
+from reachy_mini_conversation_app.tools.types import ToolResult, ToolDependencies
 
 
 logger = logging.getLogger(__name__)
 
 
-class Remember(Tool):
-    """Save one short long-term memory fact about the user."""
-
-    name = "remember"
-    description = (
-        "Save ONE short fact about the user to long-term memory so it is available in future sessions. "
-        "Use this for stable user information they explicitly shared: name, preferences, hobbies, recurring projects, "
-        "important people, or plans. Keep each fact atomic and under one sentence. Do not save sensitive data "
-        "(passwords, addresses, payment info, health diagnoses) or fleeting details. Use this silently in the "
-        'background; acknowledge naturally without saying "I will remember that".'
-    )
-    parameters_schema = {
-        "type": "object",
-        "properties": {
-            "fact": {
-                "type": "string",
-                "description": (
-                    "A short, third-person statement about the user, such as "
-                    '"Has a dog named Mochi" or "Prefers replies in French". One fact per call.'
-                ),
-            },
-        },
-        "required": ["fact"],
+@function_tool(
+    name_override="remember",
+    description_override=(
+        "Save one durable, non-sensitive fact explicitly stated by the user. "
+        "Pass replaces_memory_id=null for a new memory, or its exact bracketed ID when correcting one."
+    ),
+)
+async def remember_tool(
+    context: RunContextWrapper[ToolDependencies],
+    fact: str,
+    replaces_memory_id: str | None,
+) -> ToolResult:
+    """Save or replace one explicit long-term memory note."""
+    try:
+        change = context.context.memory.remember(fact, replaces_memory_id=replaces_memory_id)
+    except (OSError, ValueError) as error:
+        logger.warning("Rejected memory write: %s", error)
+        return {"error": f"Failed to save memory: {error}"}
+    logger.info("Memory %s id=%s", change.status, change.note.id)
+    return {
+        "status": change.status,
+        "memory": change.note.text,
+        "memory_id": change.note.id,
     }
 
-    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> dict[str, Any]:
-        """Save one memory fact."""
-        fact = kwargs.get("fact")
-        if not isinstance(fact, str) or not fact.strip():
-            logger.warning("remember: empty fact")
-            return {"error": "fact must be a non-empty string"}
 
-        stored = add_memory_fact(deps.instance_path, fact)
-        if stored is None:
-            return {"error": "fact was empty or invalid; nothing was saved"}
-
-        logger.info("Tool call: remember fact=%s", stored.text[:120])
-        return {"saved": stored.text, "memory_id": stored.id}
+remember: FunctionTool = remember_tool

@@ -1,6 +1,5 @@
 """Helpers for app startup and shutdown lifecycle behavior."""
 
-import asyncio
 import logging
 import urllib.error
 import urllib.request
@@ -12,7 +11,6 @@ from reachy_mini import ReachyMini
 from reachy_mini.reachy_mini import SLEEP_HEAD_POSE
 from reachy_mini.utils.interpolation import distance_between_poses
 from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
-from reachy_mini_conversation_app.tools.go_to_sleep import GoToSleep
 
 
 _STOP_CURRENT_APP_PATH = "/api/apps/stop-current-app"
@@ -77,8 +75,10 @@ def wake_up_if_sleeping(robot: ReachyMini, logger: logging.Logger) -> bool:
 
 def run_go_to_sleep_tool(deps: ToolDependencies, logger: logging.Logger) -> dict[str, object]:
     """Run the shared go_to_sleep tool from synchronous shutdown paths."""
+    if deps.go_to_sleep is None:
+        return {"error": "go_to_sleep is unavailable in this runtime"}
     try:
-        return asyncio.run(GoToSleep()(deps))
+        return deps.go_to_sleep()
     except Exception as e:
         logger.error("Failed to run go_to_sleep tool during shutdown: %s", e)
         return {"error": f"go_to_sleep failed: {type(e).__name__}: {e}"}

@@ -4,14 +4,14 @@ This module implements dance moves and emotions as Move objects that can be queu
 and executed sequentially by the MovementManager.
 """
 
-from __future__ import annotations
 import logging
-from typing import Tuple
 
 import numpy as np
 from numpy.typing import NDArray
 
+from reachy_mini.utils import create_head_pose
 from reachy_mini.motion.move import Move
+from reachy_mini.utils.interpolation import linear_pose_interpolation
 from reachy_mini.motion.recorded_move import RecordedMoves
 from reachy_mini_dances_library.dance_move import DanceMove
 
@@ -19,7 +19,7 @@ from reachy_mini_dances_library.dance_move import DanceMove
 logger = logging.getLogger(__name__)
 
 
-class DanceQueueMove(Move):  # type: ignore
+class DanceQueueMove(Move):
     """Wrapper for dance moves to work with the movement queue system."""
 
     def __init__(self, move_name: str):
@@ -44,16 +44,14 @@ class DanceQueueMove(Move):  # type: ignore
 
             return (head_pose, antennas, body_yaw)
 
-        except Exception as e:
-            logger.error(f"Error evaluating dance move '{self.move_name}' at t={t}: {e}")
+        except Exception as error:
+            logger.error("Error evaluating dance move %r at t=%s: %s", self.move_name, t, error)
             # Return neutral pose on error
-            from reachy_mini.utils import create_head_pose
-
             neutral_head_pose = create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
             return (neutral_head_pose, np.array([0.0, 0.0], dtype=np.float64), 0.0)
 
 
-class EmotionQueueMove(Move):  # type: ignore
+class EmotionQueueMove(Move):
     """Wrapper for emotion moves to work with the movement queue system."""
 
     def __init__(self, emotion_name: str, recorded_moves: RecordedMoves):
@@ -78,24 +76,22 @@ class EmotionQueueMove(Move):  # type: ignore
 
             return (head_pose, antennas, body_yaw)
 
-        except Exception as e:
-            logger.error(f"Error evaluating emotion '{self.emotion_name}' at t={t}: {e}")
+        except Exception as error:
+            logger.error("Error evaluating emotion %r at t=%s: %s", self.emotion_name, t, error)
             # Return neutral pose on error
-            from reachy_mini.utils import create_head_pose
-
             neutral_head_pose = create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
             return (neutral_head_pose, np.array([0.0, 0.0], dtype=np.float64), 0.0)
 
 
-class GotoQueueMove(Move):  # type: ignore
+class GotoQueueMove(Move):
     """Wrapper for goto moves to work with the movement queue system."""
 
     def __init__(
         self,
-        target_head_pose: NDArray[np.float32],
-        start_head_pose: NDArray[np.float32] | None = None,
-        target_antennas: Tuple[float, float] = (0, 0),
-        start_antennas: Tuple[float, float] | None = None,
+        target_head_pose: NDArray[np.float64],
+        start_head_pose: NDArray[np.float64] | None = None,
+        target_antennas: tuple[float, float] = (0, 0),
+        start_antennas: tuple[float, float] | None = None,
         target_body_yaw: float = 0,
         start_body_yaw: float | None = None,
         duration: float = 1.0,
@@ -117,9 +113,6 @@ class GotoQueueMove(Move):  # type: ignore
     def evaluate(self, t: float) -> tuple[NDArray[np.float64] | None, NDArray[np.float64] | None, float | None]:
         """Evaluate goto move at time t using linear interpolation."""
         try:
-            from reachy_mini.utils import create_head_pose
-            from reachy_mini.utils.interpolation import linear_pose_interpolation
-
             # Clamp t to [0, 1] for interpolation
             t_clamped = max(0, min(1, t / self.duration))
 
@@ -146,8 +139,8 @@ class GotoQueueMove(Move):  # type: ignore
 
             return (head_pose, antennas, body_yaw)
 
-        except Exception as e:
-            logger.error(f"Error evaluating goto move at t={t}: {e}")
+        except Exception as error:
+            logger.error("Error evaluating goto move at t=%s: %s", t, error)
             # Return target pose on error - convert to float64
             target_head_pose_f64 = self.target_head_pose.astype(np.float64)
             target_antennas_array = np.array([self.target_antennas[0], self.target_antennas[1]], dtype=np.float64)

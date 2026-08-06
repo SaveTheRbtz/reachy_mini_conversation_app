@@ -1,11 +1,12 @@
 """Helpers for persisting UI-selected startup profile and voice settings."""
 
-from __future__ import annotations
 import os
 import json
 import logging
 from pathlib import Path
 from dataclasses import dataclass
+
+from reachy_mini_conversation_app.config import LOCKED_PROFILE, set_custom_profile
 
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ def read_startup_settings(instance_path: str | Path | None) -> StartupSettings:
 
     try:
         payload = json.loads(settings_path.read_text(encoding="utf-8"))
-    except Exception as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         logger.warning("Failed to read startup settings from %s: %s", settings_path, exc)
         return StartupSettings()
 
@@ -91,8 +92,6 @@ def write_startup_settings(
 
 def load_startup_settings_into_runtime(instance_path: str | Path | None) -> StartupSettings:
     """Load instance-local startup settings when no explicit profile override is set."""
-    from reachy_mini_conversation_app.config import LOCKED_PROFILE, set_custom_profile
-
     if LOCKED_PROFILE is not None:
         return StartupSettings()
 

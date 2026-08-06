@@ -1,7 +1,6 @@
-/** JSON-RPC-over-WebSocket client for the settings backend (/rpc). */
+/** JSON-RPC-over-WebSocket client for the app settings service (/rpc). */
 
 const DEFAULT_TIMEOUT_MS = 8000;
-const TOOL_SPACE_TIMEOUT_MS = 60000;
 
 const RPC_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/rpc`;
 
@@ -106,7 +105,7 @@ export function subscribe(method, cb) {
 const STARTUP_POLL_MS = 2000;
 const STARTUP_DEADLINE_MS = 90000;
 
-/** Retry a request while the backend is still coming up at startup. */
+/** Retry a request while the app is still coming up at startup. */
 export async function untilReady(requestFn, signal, onRetry) {
   const deadline = Date.now() + STARTUP_DEADLINE_MS;
   let notified = false;
@@ -141,13 +140,7 @@ export const listVoices = () => rpcCall("voices.list");
 export const getCurrentVoice = () => rpcCall("voices.current");
 export const applyVoice = (voice) => rpcCall("voices.apply", { voice });
 
-export const saveBackendConfig = (payload) => rpcCall("backend.config", payload);
-
-export const listToolSpaces = () => rpcCall("tool_spaces.list");
-export const addToolSpace = (slug) =>
-  rpcCall("tool_spaces.add", { slug }, { timeoutMs: TOOL_SPACE_TIMEOUT_MS });
-export const removeToolSpace = (slug) =>
-  rpcCall("tool_spaces.remove", { slug }, { timeoutMs: TOOL_SPACE_TIMEOUT_MS });
+export const saveOpenAIConfig = (apiKey) => rpcCall("openai.config", { api_key: apiKey });
 
 export const getProfileTools = (profile) =>
   rpcCall("profile_tools.get", profile ? { profile } : {});
@@ -156,19 +149,12 @@ export const saveProfileTools = (profile, enabledTools) =>
 export const resetProfileTools = (profile) =>
   rpcCall("profile_tools.reset", { profile });
 
-/** Backend error codes that need friendlier copy than the raw code. */
+/** Error codes that need friendlier copy than the raw code. */
 const ERROR_MESSAGES = Object.freeze({
-  invalid_backend: "Unknown backend selected.",
-  empty_key: "An API key is required for this backend.",
-  empty_hf_host: "Enter a Hugging Face host.",
-  invalid_hf_host: "That Hugging Face host doesn't look right.",
-  invalid_hf_port: "That Hugging Face port doesn't look right.",
-  invalid_hf_mode: "Unknown Hugging Face mode.",
-  missing_hf_session_url: "Couldn't reach the Hugging Face Space. Check it's running.",
+  invalid_openai_key: "Enter an OpenAI API key.",
   invalid_name: "Enter a valid profile name.",
   invalid_instructions: "Enter personality instructions.",
   profile_exists: "A personality with this name already exists.",
-  invalid_tool_space_slug: "Enter a Space in owner/name format.",
   invalid_tool_selection: "One or more selected tools are no longer available.",
   unknown_profile: "That personality is no longer available.",
   missing_voice: "Choose a voice first.",
@@ -176,7 +162,6 @@ const ERROR_MESSAGES = Object.freeze({
   profile_in_use: "This personality is active or set to load at startup. Switch to another one first.",
   not_deletable: "This personality can't be deleted.",
   loop_unavailable: "Reachy is still starting up. Try again in a moment.",
-  tool_space_not_installed: "That Tool Space is no longer installed.",
 });
 
 /** Map a thrown error to user-facing copy, falling back to its raw message. */

@@ -40,7 +40,7 @@ def test_profile_document_round_trip(tmp_path: Path) -> None:
         ("+++\nschema_version = 1\ndefault_tools = []\n", "missing closing"),
         ("+++\nschema_version = 2\ndefault_tools = []\n+++\nPrompt\n", "Unsupported profile schema"),
         ("+++\nschema_version = 1\ndefault_tools = 'dance'\n+++\nPrompt\n", "expected a list of strings"),
-        ("+++\nschema_version = 1\ndefault_tools = []\nvoiec = 'Aiden'\n+++\nPrompt\n", "Unknown profile metadata"),
+        ("+++\nschema_version = 1\ndefault_tools = []\nvoiec = 'marin'\n+++\nPrompt\n", "Unknown profile metadata"),
         ("+++\nschema_version = 1\ndefault_tools = []\n+++\n", "empty instruction body"),
     ],
 )

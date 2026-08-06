@@ -79,7 +79,9 @@ def test_prompts_load_from_compact_builtin_profile(tmp_path: Path, monkeypatch: 
         DEFAULT_PROFILES_DIRECTORY / "mad_scientist_assistant",
     ).instructions
 
-    assert prompts_mod.get_session_instructions(instance_path=tmp_path) == expected
+    instructions = prompts_mod.get_profile_instructions()
+    assert instructions.startswith("# Conversation")
+    assert instructions.endswith(expected)
 
 
 def test_default_session_instructions_load_from_default_profile(
@@ -91,7 +93,9 @@ def test_default_session_instructions_load_from_default_profile(
 
     expected = read_profile_from_directory("default", DEFAULT_PROFILES_DIRECTORY / "default").instructions
 
-    assert prompts_mod.get_session_instructions(instance_path=tmp_path) == expected
+    instructions = prompts_mod.get_profile_instructions()
+    assert instructions.startswith("# Conversation")
+    assert instructions.endswith(expected)
 
 
 def test_bracketed_prompt_line_stays_plain_text(
@@ -105,7 +109,7 @@ def test_bracketed_prompt_line_stays_plain_text(
     monkeypatch.setattr(config, "PROFILES_DIRECTORY", tmp_path)
     monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "literal_prompt")
 
-    assert prompts_mod.get_session_instructions(instance_path=tmp_path) == "[custom_prompt]\n\nStay extra brief."
+    assert prompts_mod.get_profile_instructions().endswith("[custom_prompt]\n\nStay extra brief.")
 
 
 def test_session_instructions_fall_back_to_default_for_incomplete_profile(
@@ -121,7 +125,7 @@ def test_session_instructions_fall_back_to_default_for_incomplete_profile(
 
     expected = read_profile_from_directory("default", DEFAULT_PROFILES_DIRECTORY / "default").instructions
 
-    assert prompts_mod.get_session_instructions(instance_path=tmp_path) == expected
+    assert prompts_mod.get_profile_instructions().endswith(expected)
 
 
 def test_explicit_default_profile_does_not_fall_back_to_itself(
@@ -139,16 +143,16 @@ def test_explicit_default_profile_does_not_fall_back_to_itself(
 
     with caplog.at_level(logging.WARNING, logger="reachy_mini_conversation_app.prompts"):
         with pytest.raises(RuntimeError, match="Default profile has no usable instructions"):
-            prompts_mod.get_session_instructions(instance_path=tmp_path)
+            prompts_mod.get_profile_instructions()
 
     assert "Using default profile instructions" not in caplog.text
 
 
-def test_session_voice_defaults_to_hf_voice(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Session voice should fall back to the Hugging Face default voice."""
+def test_session_voice_defaults_to_openai_voice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Session voice should fall back to the OpenAI default voice."""
     monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", None)
 
-    assert prompts_mod.get_session_voice() == "Aiden"
+    assert prompts_mod.get_session_voice() == "marin"
 
 
 def test_session_greeting_prompt_loads_from_selected_profile(
@@ -215,7 +219,7 @@ def test_headless_profile_write_defaults_voice_at_call_time(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """New headless profiles should use the Hugging Face default voice."""
+    """New headless profiles should use the OpenAI default voice."""
     monkeypatch.setattr(config, "INSTANCE_PATH", tmp_path)
 
     headless_mod.save_user_personality("runtime_voice_default", "test instructions")
@@ -224,7 +228,7 @@ def test_headless_profile_write_defaults_voice_at_call_time(
         "runtime_voice_default",
         tmp_path / "user_personalities" / "runtime_voice_default",
     )
-    assert profile.voice == "Aiden"
+    assert profile.voice == "marin"
 
 
 def test_headless_profile_write_uses_terminal_storage_without_instance(
@@ -264,7 +268,7 @@ def test_user_profile_round_trips_through_instance_dir(tmp_path: Path, monkeypat
 
     assert (tmp_path / "user_personalities" / "zen_master" / "profile.md").is_file()
     assert "user_personalities/zen_master" in list_personalities()
-    assert prompts_mod.get_session_instructions(instance_path=tmp_path) == "Be calm."
+    assert prompts_mod.get_profile_instructions().endswith("Be calm.")
 
 
 def test_packaged_profiles_win_outside_source_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -275,9 +279,9 @@ def test_packaged_profiles_win_outside_source_checkout(tmp_path: Path, monkeypat
     packaged_profiles.mkdir(parents=True)
 
     monkeypatch.setattr(config_mod, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(config_mod, "_packaged_profiles_directory", lambda: packaged_profiles)
+    monkeypatch.setattr(config_mod, "files", lambda _package: tmp_path / "package_data")
 
-    assert config_mod._resolve_default_profiles_directory() == packaged_profiles
+    assert config_mod._default_profiles_directory() == packaged_profiles
 
 
 def test_project_file_paths_stay_within_windows_budget() -> None:

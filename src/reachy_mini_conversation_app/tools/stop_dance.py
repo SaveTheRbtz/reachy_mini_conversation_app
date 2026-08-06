@@ -1,32 +1,22 @@
 import logging
-from typing import Any, Dict
 
-from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies
+from agents import FunctionTool, RunContextWrapper, function_tool
+
+from reachy_mini_conversation_app.tools.types import ToolResult, ToolDependencies
 
 
 logger = logging.getLogger(__name__)
 
 
-class StopDance(Tool):
-    """Stop the current dance move."""
+@function_tool(
+    name_override="stop_dance",
+    description_override="Stop the current dance and clear queued robot movement.",
+)
+async def stop_dance_tool(context: RunContextWrapper[ToolDependencies]) -> ToolResult:
+    """Stop the current dance."""
+    context.context.movement_manager.clear_move_queue()
+    logger.info("Stopped dance and cleared movement queue")
+    return {"status": "stopped dance and cleared queue"}
 
-    name = "stop_dance"
-    description = "Stop the current dance move"
-    needs_response = False
-    parameters_schema = {
-        "type": "object",
-        "properties": {
-            "dummy": {
-                "type": "boolean",
-                "description": "dummy boolean, set it to true",
-            },
-        },
-        "required": ["dummy"],
-    }
 
-    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
-        """Stop the current dance move."""
-        logger.info("Tool call: stop_dance")
-        movement_manager = deps.movement_manager
-        movement_manager.clear_move_queue()
-        return {"status": "stopped dance and cleared queue"}
+stop_dance: FunctionTool = stop_dance_tool

@@ -6,7 +6,7 @@ default_tools = [
   "play_emotion",
   "stop_emotion",
   "camera",
-  "idle_do_nothing",
+  "wait_for_user",
   "move_head",
   "go_to_sleep",
   "remember",

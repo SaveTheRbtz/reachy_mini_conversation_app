@@ -1023,52 +1023,6 @@ button {
   margin-top: 14px;
 }
 
-.settings-tool-space-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-}
-
-.settings-list-title {
-  margin: 20px 0 10px;
-  color: var(--text-soft);
-  font-size: 0.88rem;
-  font-weight: 600;
-}
-
-.settings-tool-spaces {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.settings-tool-space {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-soft);
-}
-
-.settings-tool-space-summary {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.settings-tool-space-name {
-  overflow-wrap: anywhere;
-  font-size: 0.92rem;
-  font-weight: 600;
-}
-
-.settings-tool-space-meta {
-  color: var(--text-muted);
-  font-size: 0.82rem;
-}
-
 .settings-status {
   margin: 0;
   font-size: 0.85rem;
@@ -1136,14 +1090,6 @@ button {
   .settings-field-row,
   .settings-status-row {
     grid-template-columns: 1fr;
-  }
-
-  .settings-tool-space-controls {
-    grid-template-columns: 1fr;
-  }
-
-  .settings-tool-space-controls .btn {
-    width: 100%;
   }
 
   .settings-tool-grid {

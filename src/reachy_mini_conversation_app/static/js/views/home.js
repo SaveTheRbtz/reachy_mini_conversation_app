@@ -112,7 +112,7 @@ export async function mountHomeView({ outlet, signal, navigate }) {
         name: created.name,
         instructions: created.instructions,
         greeting: created.greeting || null,
-        voice: "", // falls back to backend default; user can change in Settings
+        voice: "", // falls back to the app default; user can change it in Settings
       });
       if (signal.aborted) return;
       newName = saveResult?.value || created.name;

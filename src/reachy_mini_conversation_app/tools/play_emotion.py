@@ -2,28 +2,18 @@ import re
 import random
 import logging
 import unicodedata
-from typing import TYPE_CHECKING, Any, Dict
+from typing import Final
 
-from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies
+from agents import FunctionTool, RunContextWrapper, function_tool
 
-
-if TYPE_CHECKING:
-    from reachy_mini.motion.recorded_move import RecordedMoves
+from reachy_mini.motion.recorded_move import RecordedMoves
+from reachy_mini_conversation_app.tools.types import ToolResult, ToolDependencies
+from reachy_mini_conversation_app.dance_emotion_moves import EmotionQueueMove
 
 
 logger = logging.getLogger(__name__)
 
-try:
-    from reachy_mini.motion.recorded_move import RecordedMoves
-    from reachy_mini_conversation_app.dance_emotion_moves import EmotionQueueMove
-
-    EMOTION_AVAILABLE = True
-except Exception as e:
-    logger.warning(f"Emotion library not available: {e}")
-    EMOTION_AVAILABLE = False
-
-
-EMOTION_INTENTS: tuple[str, ...] = (
+EMOTION_INTENTS: Final = (
     "random",
     "happy",
     "excited",
@@ -231,58 +221,34 @@ def random_curated_emotion(available_emotions: list[str]) -> str:
     return random.choice(available_emotions)
 
 
-class PlayEmotion(Tool):
-    """Play a pre-recorded emotion."""
+_recorded_moves: RecordedMoves | None = None
 
-    name = "play_emotion"
-    description = "Play a robot emotion matching a requested emotional intent."
-    needs_response = False
-    parameters_schema = {
-        "type": "object",
-        "properties": {
-            "emotion": {
-                "type": "string",
-                "enum": list(EMOTION_INTENTS),
-                "description": (
-                    "Compact emotional intent to express. Choose one of the enum values. Use nuanced "
-                    "labels like no_sad, no_excited, no_firm, or yes_understanding when plain yes/no "
-                    "loses meaning. Use random if no clear intent fits."
-                ),
-            },
-        },
-        "required": [],
-    }
-    _library: "RecordedMoves | None" = None
 
-    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
-        """Play a pre-recorded emotion."""
-        if not EMOTION_AVAILABLE:
-            return {"error": "Emotion system not available"}
+@function_tool(
+    name_override="play_emotion",
+    description_override="Play a robot emotion matching a compact emotional intent.",
+)
+async def play_emotion_tool(
+    context: RunContextWrapper[ToolDependencies],
+    emotion: str = "random",
+) -> ToolResult:
+    """Queue a curated recorded emotion."""
+    global _recorded_moves
+    logger.info("Tool call: play_emotion emotion=%s", emotion)
+    try:
+        if _recorded_moves is None:
+            _recorded_moves = RecordedMoves("pollen-robotics/reachy-mini-emotions-library")
+        emotion_names = _recorded_moves.list_moves()
+        if not emotion_names:
+            return {"error": "No emotions are available"}
+        emotion_name = resolve_emotion_name(emotion, emotion_names)
+        if emotion_name is None:
+            emotion_name = random_curated_emotion(emotion_names)
+        context.context.movement_manager.queue_move(EmotionQueueMove(emotion_name, _recorded_moves))
+        return {"status": "queued", "emotion": emotion_name}
+    except Exception as error:
+        logger.exception("Failed to play emotion")
+        return {"error": f"Failed to play emotion: {type(error).__name__}: {error}"}
 
-        requested_emotion = kwargs.get("emotion")
 
-        logger.info("Tool call: play_emotion emotion=%s", requested_emotion)
-
-        try:
-            if self._library is None:
-                # Constructing this downloads the dataset, so it must not run at import.
-                self._library = RecordedMoves("pollen-robotics/reachy-mini-emotions-library")
-            library = self._library
-            emotion_names = library.list_moves()
-            if not emotion_names:
-                return {"error": "No emotions currently available"}
-
-            emotion_name = resolve_emotion_name(requested_emotion, emotion_names)
-            if not emotion_name:
-                logger.info("play_emotion: %r did not resolve; using random curated", requested_emotion)
-                emotion_name = random_curated_emotion(emotion_names)
-
-            movement_manager = deps.movement_manager
-            emotion_move = EmotionQueueMove(emotion_name, library)
-            movement_manager.queue_move(emotion_move)
-
-            return {"status": "queued", "emotion": emotion_name}
-
-        except Exception as e:
-            logger.exception("Failed to play emotion")
-            return {"error": f"Failed to play emotion: {e!s}"}
+play_emotion: FunctionTool = play_emotion_tool

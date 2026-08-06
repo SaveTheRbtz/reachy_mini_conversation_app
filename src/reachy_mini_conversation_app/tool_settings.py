@@ -8,7 +8,6 @@ from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 
 from reachy_mini.io.jsonrpc import JsonRpcError
-from reachy_mini_conversation_app.tools.core_tools import initialize_tools
 
 
 logger = logging.getLogger(__name__)
@@ -34,13 +33,8 @@ def apply_tool_change(
     restart_conversation: RestartCallback,
     reason: str,
 ) -> str:
-    """Reload active tools and reconnect a running conversation."""
-    try:
-        initialize_tools(instance_path=instance_path, force=True)
-    except Exception:
-        logger.exception("Failed to reload tools after saving tool settings")
-        return "Saved. Restart the conversation app to apply the tool changes."
-
+    """Reconnect a running conversation after persisted tool settings change."""
+    del instance_path
     try:
         conversation_loop = get_loop()
     except Exception:

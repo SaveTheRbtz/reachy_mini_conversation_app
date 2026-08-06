@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from typing import Any
 from pathlib import Path
 from collections.abc import Callable
 
@@ -48,7 +47,7 @@ def _validated_profile(profile: str | None, known_profile_names: list[str]) -> s
     return profile_name
 
 
-def _profile_param(params: dict[str, Any], *, required: bool = False) -> str | None:
+def _profile_param(params: dict[str, object], *, required: bool = False) -> str | None:
     profile = params.get("profile")
     if profile is None and not required:
         return None
@@ -90,7 +89,7 @@ def register_profile_tool_methods(
 ) -> None:
     """Register per-personality tool-access methods."""
 
-    async def _get_profile_tools(params: dict[str, Any]) -> dict[str, object]:
+    async def _get_profile_tools(params: dict[str, object]) -> dict[str, object]:
         requested_profile = _profile_param(params)
         try:
             known_profile_names = await asyncio.to_thread(_known_profile_names)
@@ -118,7 +117,7 @@ def register_profile_tool_methods(
             overridden=override is not None,
         )
 
-    async def _save_profile_tools(params: dict[str, Any]) -> dict[str, object]:
+    async def _save_profile_tools(params: dict[str, object]) -> dict[str, object]:
         if LOCKED_PROFILE is not None:
             raise_tool_settings_error("profile_locked", "Personality tool editing is locked.")
         requested_profile = _profile_param(params, required=True)
@@ -176,7 +175,7 @@ def register_profile_tool_methods(
         response["message"] = f"Saved tools for {profile_name}. {apply_detail}"
         return response
 
-    async def _reset_profile_tools(params: dict[str, Any]) -> dict[str, object]:
+    async def _reset_profile_tools(params: dict[str, object]) -> dict[str, object]:
         if LOCKED_PROFILE is not None:
             raise_tool_settings_error("profile_locked", "Personality tool editing is locked.")
         requested_profile = _profile_param(params, required=True)

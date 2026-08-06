@@ -1,11 +1,9 @@
-from __future__ import annotations
 import logging
 import argparse
 import warnings
-from typing import Optional
 
 
-def parse_args() -> tuple[argparse.Namespace, list]:  # type: ignore
+def parse_args() -> tuple[argparse.Namespace, list[str]]:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser("Reachy Mini Conversation App")
     parser.add_argument("--no-camera", default=False, action="store_true", help="Disable camera usage")
@@ -22,30 +20,6 @@ def parse_args() -> tuple[argparse.Namespace, list]:  # type: ignore
         default=None,
         help="[Optional] Robot name to target. Must match the daemon's --robot-name when connecting to a specific robot, mainly useful for development with multiple robots.",
     )
-    subparsers = parser.add_subparsers(dest="command")
-    tool_spaces_parser = subparsers.add_parser("tool-spaces", help="Manage installed Hugging Face Space tool sources")
-    tool_spaces_subparsers = tool_spaces_parser.add_subparsers(dest="tool_spaces_command", required=True)
-
-    add_parser = tool_spaces_subparsers.add_parser("add", help="Install one Space tool source by slug")
-    add_parser.add_argument("space_slug", help="Hugging Face Space slug in the form owner/space-name")
-    add_parser.add_argument(
-        "--install-only",
-        action="store_true",
-        default=False,
-        help="Install the Space without enabling its tools in any profile.",
-    )
-    add_parser.add_argument(
-        "--profile",
-        dest="profile",
-        default=None,
-        metavar="PROFILE",
-        help="Enable tools in this profile instead of the active profile.",
-    )
-
-    remove_parser = tool_spaces_subparsers.add_parser("remove", help="Remove one installed Space tool source")
-    remove_parser.add_argument("space_slug", help="Installed Hugging Face Space slug in the form owner/space-name")
-
-    tool_spaces_subparsers.add_parser("list", help="List installed Space tool sources")
     return parser.parse_known_args()
 
 
@@ -75,13 +49,13 @@ def setup_logger(debug: bool) -> logging.Logger:
     return logger
 
 
-def log_connection_troubleshooting(logger: logging.Logger, robot_name: Optional[str]) -> None:
+def log_connection_troubleshooting(logger: logging.Logger, robot_name: str | None) -> None:
     """Log troubleshooting steps for connection issues."""
     logger.error("Troubleshooting steps:")
     logger.error("  1. Verify reachy-mini-daemon is running")
 
     if robot_name is not None:
-        logger.error(f"  2. Daemon must be started with: --robot-name '{robot_name}'")
+        logger.error("  2. Daemon must be started with: --robot-name %r", robot_name)
     else:
         logger.error("  2. If daemon uses --robot-name, add the same flag here: --robot-name <name>")
 

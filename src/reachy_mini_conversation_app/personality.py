@@ -3,7 +3,7 @@
 import re
 import shutil
 import logging
-from typing import Literal, TypedDict
+from typing import TypeAlias
 from pathlib import Path
 from collections.abc import Iterable
 
@@ -11,9 +11,7 @@ from reachy_mini_conversation_app.config import (
     USER_PERSONALITIES_DIRNAME,
     config,
     get_default_voice,
-    list_tool_module_names,
 )
-from reachy_mini_conversation_app.tool_spaces import read_installed_tool_spaces
 from reachy_mini_conversation_app.profile_store import (
     DEFAULT_PROFILE_NAME,
     ProfileFormatError,
@@ -29,19 +27,18 @@ from reachy_mini_conversation_app.profile_toolsets import (
     clear_profile_tool_override,
     profile_toolsets_transaction,
 )
-from reachy_mini_conversation_app.tools.tool_constants import SystemTool
+from reachy_mini_conversation_app.tools.core_tools import (
+    ToolCatalogEntry,
+)
+from reachy_mini_conversation_app.tools.core_tools import (
+    available_tool_catalog as available_tool_catalog,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
-class AvailableTool(TypedDict):
-    """Tool metadata used by personality configuration surfaces."""
-
-    id: str
-    kind: Literal["shared", "external", "tool_space"]
-    source: str
-    description: str
+AvailableTool: TypeAlias = ToolCatalogEntry
 
 
 def _visible_profile_names(profiles_root: Path, prefix: str = "") -> list[str]:
@@ -69,43 +66,6 @@ def list_personalities() -> list[str]:
     if user_root != config.PROFILES_DIRECTORY:
         names.extend(_visible_profile_names(user_root, f"{USER_PERSONALITIES_DIRNAME}/"))
     return names
-
-
-def available_tool_catalog() -> list[AvailableTool]:
-    """List configurable tools and their source."""
-    catalog: dict[str, AvailableTool] = {}
-    excluded_modules = {"__init__", "core_tools", "background_tool_manager", "tool_constants"}
-    excluded_modules.update(tool.value for tool in SystemTool)
-    for tool_name in list_tool_module_names(Path(__file__).parent / "tools"):
-        if tool_name in excluded_modules:
-            continue
-        catalog[tool_name] = {
-            "id": tool_name,
-            "kind": "shared",
-            "source": "Built-in",
-            "description": "",
-        }
-
-    for tool_name in list_tool_module_names(config.TOOLS_DIRECTORY):
-        catalog[tool_name] = {
-            "id": tool_name,
-            "kind": "external",
-            "source": "External",
-            "description": "",
-        }
-
-    try:
-        for space in read_installed_tool_spaces(config.INSTANCE_PATH).spaces:
-            for tool in space.tools:
-                catalog[tool.local_name] = {
-                    "id": tool.local_name,
-                    "kind": "tool_space",
-                    "source": space.slug,
-                    "description": tool.description,
-                }
-    except (RuntimeError, ValueError) as exc:
-        logger.warning("Failed to list installed Tool Space tools: %s", exc)
-    return [catalog[tool_id] for tool_id in sorted(catalog)]
 
 
 def delete_personality(name: str) -> bool:
