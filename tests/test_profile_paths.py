@@ -179,8 +179,9 @@ def test_explicit_default_profile_does_not_fall_back_to_itself(
 def test_session_voice_defaults_to_openai_voice(monkeypatch: pytest.MonkeyPatch) -> None:
     """Session voice should fall back to the OpenAI default voice."""
     monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", None)
+    monkeypatch.delenv(config_mod.OPENAI_VOICE_ENV, raising=False)
 
-    assert prompts_mod.get_session_voice() == "coral"
+    assert prompts_mod.get_session_voice() == "marin"
 
 
 def test_session_greeting_prompt_loads_from_selected_profile(
@@ -256,7 +257,7 @@ def test_headless_profile_write_defaults_voice_at_call_time(
         "runtime_voice_default",
         tmp_path / "user_personalities" / "runtime_voice_default",
     )
-    assert profile.voice == "coral"
+    assert profile.voice == "marin"
 
 
 def test_headless_profile_write_uses_terminal_storage_without_instance(

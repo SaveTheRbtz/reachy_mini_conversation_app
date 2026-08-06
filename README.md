@@ -71,6 +71,7 @@ OPENAI_API_KEY=sk-...
 | Variable | Description |
 |----------|-------------|
 | `OPENAI_API_KEY` | Required. Used for `gpt-realtime-2.1` and the `gpt-5.6-luna` memory reducer. It can also be saved from the web UI. |
+| `OPENAI_VOICE` | Default OpenAI Realtime voice when neither the active profile nor saved UI settings select one. Defaults to `marin`. |
 | `REACHY_MINI_CUSTOM_PROFILE` | Optional bundled profile directory name. Ignored after a startup profile has been saved in the UI. |
 | `REACHY_MINI_APP_TIMEOUT_MINUTES` | Minutes of inactivity before Reachy sleeps and the app stops. Defaults to `15`; set to `0` to disable. |
 

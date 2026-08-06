@@ -6,6 +6,21 @@ from reachy_mini_conversation_app import config
 
 
 @pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        ("", "marin"),
+        ("cedar", "cedar"),
+        ("unsupported", "marin"),
+    ],
+)
+def test_get_default_voice(monkeypatch: pytest.MonkeyPatch, raw_value: str, expected: str) -> None:
+    """The default voice should accept only supported environment overrides."""
+    monkeypatch.setenv(config.OPENAI_VOICE_ENV, raw_value)
+
+    assert config.get_default_voice() == expected
+
+
+@pytest.mark.parametrize(
     "raw_value, expected",
     [
         ("45", 45.0),

@@ -11,9 +11,10 @@ logger = logging.getLogger(__name__)
 
 REALTIME_MODEL: Final = "gpt-realtime-2.1"
 OPENAI_API_KEY_ENV: Final = "OPENAI_API_KEY"
+OPENAI_VOICE_ENV: Final = "OPENAI_VOICE"
 APP_TIMEOUT_MINUTES_ENV: Final = "REACHY_MINI_APP_TIMEOUT_MINUTES"
 DEFAULT_APP_TIMEOUT_MINUTES: Final = 15.0
-DEFAULT_VOICE: Final = "coral"
+DEFAULT_VOICE: Final = "marin"
 OPENAI_VOICES: Final = (
     "alloy",
     "ash",
@@ -101,7 +102,13 @@ def get_available_voices() -> list[str]:
 
 def get_default_voice() -> str:
     """Return the default OpenAI Realtime voice."""
-    return DEFAULT_VOICE
+    configured_voice = os.getenv(OPENAI_VOICE_ENV, "").strip()
+    if not configured_voice:
+        return DEFAULT_VOICE
+    if configured_voice not in OPENAI_VOICES:
+        logger.warning("Ignoring unsupported %s=%r; using %s.", OPENAI_VOICE_ENV, configured_voice, DEFAULT_VOICE)
+        return DEFAULT_VOICE
+    return configured_voice
 
 
 def resolve_app_timeout_minutes() -> float | None:
