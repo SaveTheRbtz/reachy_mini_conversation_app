@@ -376,11 +376,12 @@ async def test_synthesized_speech_drives_production_audio_path(
     """Send synthesized microphone frames through the production Realtime bridge."""
     memory = load_memory(tmp_path)
     dependencies, _, _ = _dependencies(tmp_path, memory)
-    conversation = RealtimeConversation(dependencies, voice="coral", output_sample_rate=48_000)
+    conversation = RealtimeConversation(dependencies, voice="coral", output_sample_rate=REACHY_SAMPLE_RATE)
     caplog.set_level(logging.INFO, logger="reachy_mini_conversation_app.realtime")
     activity_reasons: list[str] = []
     conversation.set_activity_observer(activity_reasons.append)
     assistant_audio_bytes = 0
+    assistant_item_bytes: dict[tuple[str, int], int] = {}
     assistant_audio_ended = False
     assistant_transcript: list[str] = []
     observed_events: deque[str] = deque(maxlen=20)
@@ -404,6 +405,8 @@ async def test_synthesized_speech_drives_production_audio_path(
                             pytest.fail(f"Realtime API error: {type(event.error).__name__}")
                         if isinstance(event, RealtimeAudio):
                             assistant_audio_bytes += len(event.audio.data)
+                            item = (event.item_id, event.content_index)
+                            assistant_item_bytes[item] = assistant_item_bytes.get(item, 0) + len(event.audio.data)
                         elif isinstance(event, RealtimeAudioEnd):
                             assistant_audio_ended = True
                         elif isinstance(event, RealtimeRawModelEvent) and isinstance(
@@ -431,9 +434,18 @@ async def test_synthesized_speech_drives_production_audio_path(
     assert "".join(assistant_transcript).strip()
     assert "listening" in activity_reasons
     assert "thinking" in activity_reasons
-    playback = await conversation.emit()
-    assert playback is not None
-    assert playback.samples.size > 0
+    playback_item_samples: dict[tuple[str, int], int] = {}
+    while not conversation.output_queue.empty():
+        playback = await conversation.emit()
+        if playback is not None:
+            assert playback.samples.size > 0
+            item = (playback.item_id, playback.content_index)
+            playback_item_samples[item] = playback_item_samples.get(item, 0) + playback.samples.size
+    assert playback_item_samples.keys() == assistant_item_bytes.keys()
+    for item, byte_count in assistant_item_bytes.items():
+        assert playback_item_samples[item] == pytest.approx(
+            byte_count / 2 * REACHY_SAMPLE_RATE / OPENAI_SAMPLE_RATE, abs=1
+        )
     response_logs = [message for message in caplog.messages if "Realtime response finished:" in message]
     assert response_logs
     assert "status=completed" in response_logs[-1]

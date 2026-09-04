@@ -33,6 +33,11 @@ The implementation follows the [OpenAI Realtime guide](https://developers.openai
 
 The Python process owns a single Realtime session, audio conversion, robot media, and tool execution. The optional browser UI only manages local settings and displays session state.
 
+Audio uses persistent soxr resamplers in both directions, preserving filter state and sample phase across frames.
+Microphone capture stays continuous; assistant audio flushes at each audio-item end and discards buffered samples on interruption.
+Resampled output goes directly to the SDK player without pacing or rechunking. Playback acknowledgements use emitted
+output duration, excluding samples still buffered in the resampler; they remain timing estimates, not hardware playback measurements.
+
 <p align="center">
   <img src="docs/assets/conversation_app_arch.svg" alt="Architecture Diagram" width="600"/>
 </p>

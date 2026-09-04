@@ -1,4 +1,3 @@
-import math
 import time
 import base64
 import asyncio
@@ -7,10 +6,10 @@ from typing import TypeAlias
 from dataclasses import dataclass
 from collections.abc import Callable, Iterable
 
+import soxr
 import numpy as np
 from pydantic import ValidationError
 from numpy.typing import NDArray
-from scipy.signal import resample_poly
 from agents.realtime import (
     RealtimeAgent,
     RealtimeAudio,
@@ -69,22 +68,20 @@ class PlaybackAudio:
 
     item_id: str
     content_index: int
-    source_pcm16: bytes
     samples: NDArray[np.float32]
 
 
 class StreamingAudioBridge:
     """Convert streaming Reachy audio to and from OpenAI's PCM16 format."""
 
-    _OVERLAP_SAMPLES = 32
-
     def __init__(self, output_sample_rate: int) -> None:
         """Initialize persistent input and output resampling state."""
         if output_sample_rate <= 0:
             raise ValueError("output_sample_rate must be positive")
         self.output_sample_rate = output_sample_rate
-        self._microphone_tail = np.empty(0, dtype=np.float32)
-        self._playback_tail = np.empty(0, dtype=np.float32)
+        self._microphone_sample_rate: int | None = None
+        self._microphone_resampler: soxr.ResampleStream | None = None
+        self._playback_resampler = soxr.ResampleStream(OPENAI_SAMPLE_RATE, output_sample_rate, 1)
 
     @staticmethod
     def _mono_float32(samples: AudioSamples) -> NDArray[np.float32]:
@@ -98,57 +95,27 @@ class StreamingAudioBridge:
             return np.asarray(samples, dtype=np.float32)
         raise TypeError(f"Unsupported audio dtype: {samples.dtype}")
 
-    @staticmethod
-    def _resample(
-        samples: NDArray[np.float32],
-        source_rate: int,
-        target_rate: int,
-        tail: NDArray[np.float32],
-    ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
-        if source_rate <= 0:
-            raise ValueError("source sample rate must be positive")
-        if samples.size == 0:
-            return samples, tail
-        overlap_size = min(StreamingAudioBridge._OVERLAP_SAMPLES, samples.size)
-        next_tail = samples[-overlap_size:].copy()
-        if source_rate == target_rate:
-            return samples, next_tail
-
-        joined = np.concatenate((tail, samples)) if tail.size else samples
-        divisor = math.gcd(source_rate, target_rate)
-        converted = resample_poly(joined, target_rate // divisor, source_rate // divisor)
-        converted = np.asarray(converted, dtype=np.float32)
-        if tail.size:
-            discard = round(tail.size * target_rate / source_rate)
-            converted = converted[discard:]
-        return converted, next_tail
-
     def microphone_to_pcm16(self, sample_rate: int, samples: AudioSamples) -> bytes:
         """Convert one microphone frame to 24 kHz mono PCM16 bytes."""
         mono = self._mono_float32(samples)
-        converted, self._microphone_tail = self._resample(
-            mono,
-            sample_rate,
-            OPENAI_SAMPLE_RATE,
-            self._microphone_tail,
-        )
+        if self._microphone_resampler is None or self._microphone_sample_rate != sample_rate:
+            self._microphone_resampler = soxr.ResampleStream(sample_rate, OPENAI_SAMPLE_RATE, 1)
+            self._microphone_sample_rate = sample_rate
+        converted = self._microphone_resampler.resample_chunk(mono)
         pcm16 = np.clip(converted, -1.0, 1.0) * 32767.0
         return np.asarray(pcm16, dtype="<i2").tobytes()
 
-    def pcm16_to_playback(self, pcm16: bytes) -> NDArray[np.float32]:
-        """Convert one OpenAI PCM16 chunk to the Reachy output sample rate."""
+    def pcm16_to_playback(self, pcm16: bytes, *, last: bool = False) -> NDArray[np.float32]:
+        """Resample OpenAI PCM16, flushing and resetting at the end of an audio item."""
         samples = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
-        converted, self._playback_tail = self._resample(
-            samples,
-            OPENAI_SAMPLE_RATE,
-            self.output_sample_rate,
-            self._playback_tail,
-        )
+        converted = np.asarray(self._playback_resampler.resample_chunk(samples, last=last), dtype=np.float32)
+        if last:
+            self._playback_resampler.clear()
         return converted
 
     def reset_playback(self) -> None:
         """Discard output-side resampling history after interruption."""
-        self._playback_tail = np.empty(0, dtype=np.float32)
+        self._playback_resampler.clear()
 
 
 class RealtimeConversation:
@@ -173,7 +140,7 @@ class RealtimeConversation:
         self._playback_tracker = RealtimePlaybackTracker()
         self._playback_interrupted = asyncio.Event()
         self._microphone_forwarding_started = False
-        self._assistant_audio_item_id: str | None = None
+        self._assistant_audio_item: tuple[str, int] | None = None
         self._response_started_at: dict[str, float] = {}
         self._tool_started_at: float | None = None
         self._last_audio_send_warning_at = float("-inf")
@@ -356,7 +323,7 @@ class RealtimeConversation:
         try:
             await asyncio.wait_for(self._playback_interrupted.wait(), timeout=duration)
         except asyncio.TimeoutError:
-            self._playback_tracker.on_play_bytes(audio.item_id, audio.content_index, audio.source_pcm16)
+            self._playback_tracker.on_play_ms(audio.item_id, audio.content_index, duration * 1000)
 
     def acknowledge_playback_end(self) -> None:
         """Mark listening only after all queued assistant audio has played."""
@@ -368,15 +335,16 @@ class RealtimeConversation:
         if isinstance(event, RealtimeAudio):
             self._playback_interrupted.clear()
             playback_samples = self._bridge.pcm16_to_playback(event.audio.data)
-            self.output_queue.put_nowait(
-                PlaybackAudio(
-                    item_id=event.item_id,
-                    content_index=event.content_index,
-                    source_pcm16=event.audio.data,
-                    samples=playback_samples,
+            if playback_samples.size:
+                self.output_queue.put_nowait(
+                    PlaybackAudio(
+                        item_id=event.item_id,
+                        content_index=event.content_index,
+                        samples=playback_samples,
+                    )
                 )
-            )
-            if self._assistant_audio_item_id != event.item_id:
+            audio_item = (event.item_id, event.content_index)
+            if self._assistant_audio_item != audio_item:
                 response_started_at = self._response_started_at.get(event.audio.response_id)
                 logger.info(
                     "Realtime assistant audio received: response_id=%s item_id=%s elapsed_since_response_ms=%s "
@@ -389,7 +357,7 @@ class RealtimeConversation:
                     len(event.audio.data),
                     playback_samples.size,
                 )
-                self._assistant_audio_item_id = event.item_id
+                self._assistant_audio_item = audio_item
         elif isinstance(event, RealtimeAudioInterrupted):
             logger.info(
                 "Realtime audio interrupted: item_id=%s pending_output_chunks=%d",
@@ -452,7 +420,12 @@ class RealtimeConversation:
                         usage.output_tokens if usage else None,
                     )
         elif isinstance(event, RealtimeAudioEnd):
-            self.output_queue.put_nowait(None)
+            if self._assistant_audio_item == (event.item_id, event.content_index):
+                playback_samples = self._bridge.pcm16_to_playback(b"", last=True)
+                if playback_samples.size:
+                    self.output_queue.put_nowait(PlaybackAudio(event.item_id, event.content_index, playback_samples))
+                self._assistant_audio_item = None
+                self.output_queue.put_nowait(None)
         elif isinstance(event, RealtimeToolStart):
             self._tool_started_at = time.monotonic()
             logger.info("Tool started: %s", event.tool.name)
@@ -500,6 +473,7 @@ class RealtimeConversation:
     def _clear_playback(self) -> None:
         self._playback_interrupted.set()
         self._bridge.reset_playback()
+        self._assistant_audio_item = None
         while not self.output_queue.empty():
             try:
                 self.output_queue.get_nowait()
