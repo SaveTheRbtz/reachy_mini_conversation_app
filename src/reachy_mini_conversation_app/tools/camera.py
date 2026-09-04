@@ -29,7 +29,7 @@ async def camera_tool(context: RunContextWrapper[ToolDependencies], question: st
         if jpeg_bytes is None:
             return {"error": "No frame available"}
         await dependencies.send_image(question.strip(), jpeg_bytes)
-        logger.info("Submitted a camera frame for question=%s", question[:120])
+        logger.info("Submitted camera frame: jpeg_bytes=%d", len(jpeg_bytes))
         return {"status": "image submitted", "question": question.strip()}
     except Exception as error:
         logger.exception("Camera capture failed")

@@ -96,6 +96,19 @@ Add `--ui` to serve the browser interface at `http://127.0.0.1:7860/`.
 | `--robot-name` | `None` | Connect to a named robot when several daemons share a subnet. |
 | `--debug` | `False` | Enable detailed diagnostic logging. |
 
+### Diagnostics
+
+Logs record SDK versions, the effective startup profile and voice, session connection/restart reasons, response IDs and completion
+statuses, observed response/audio timings, tool durations and outcomes, and input/cached/output token counts. A cancelled
+response can be normal during interruption. Microphone stalls and audio write failures are logged; per-item playback
+writes and pending acknowledgement counts describe the software queues, not proof that sound was physically heard.
+These diagnostics record metadata and failure reasons, not full transcripts, tool arguments/results, memory snapshots,
+or image/audio payloads. Response timings are observed locally and can include tool execution, not just model latency.
+
+Use `--debug` for additional detail. For a managed app on the robot, inspect the current boot with
+`journalctl -u reachy-mini-daemon -b --no-pager`. The SDK can wrap the app's stderr in an outer `WARNING`; use the app's
+inner log level to distinguish ordinary `INFO` messages from failures.
+
 ## Tools
 
 The default profile enables the following catalog. Tools → Tool access can enable or disable entries for each personality.

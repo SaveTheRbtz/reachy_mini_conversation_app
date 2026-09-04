@@ -368,11 +368,15 @@ async def test_default_prompt_withholds_homework_answer_and_answers_facts_direct
     assert "mars" in factual_response.lower()
 
 
-async def test_synthesized_speech_drives_production_audio_path(tmp_path: Path) -> None:
+async def test_synthesized_speech_drives_production_audio_path(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Send synthesized microphone frames through the production Realtime bridge."""
     memory = load_memory(tmp_path)
     dependencies, _, _ = _dependencies(tmp_path, memory)
     conversation = RealtimeConversation(dependencies, voice="coral", output_sample_rate=48_000)
+    caplog.set_level(logging.INFO, logger="reachy_mini_conversation_app.realtime")
     activity_reasons: list[str] = []
     conversation.set_activity_observer(activity_reasons.append)
     assistant_audio_bytes = 0
@@ -429,6 +433,11 @@ async def test_synthesized_speech_drives_production_audio_path(tmp_path: Path) -
     playback = await conversation.emit()
     assert playback is not None
     assert playback.samples.size > 0
+    response_logs = [message for message in caplog.messages if "Realtime response finished:" in message]
+    assert response_logs
+    assert "status=completed" in response_logs[-1]
+    assert "input_tokens=None" not in response_logs[-1]
+    assert not any("Cannot read Realtime response.done diagnostics" in message for message in caplog.messages)
 
 
 async def test_synthesized_speech_uses_camera_image(tmp_path: Path) -> None:

@@ -1,4 +1,5 @@
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,26 +13,30 @@ from reachy_mini_conversation_app.tools.head_tracking import head_tracking
 
 
 @pytest.mark.asyncio
-async def test_camera_submits_image_without_returning_base64() -> None:
+async def test_camera_submits_image_without_returning_base64(caplog: pytest.LogCaptureFixture) -> None:
     """Submit a captured image without leaking encoded image data."""
     jpeg = b"current jpeg"
     image_sender = AsyncMock()
     robot = SimpleNamespace(media=SimpleNamespace(get_frame_jpeg=MagicMock(return_value=jpeg)))
     dependencies = SimpleNamespace(reachy_mini=robot, camera_enabled=True, send_image=image_sender)
 
-    result = await camera.on_invoke_tool(
-        ToolContext(
-            dependencies,
-            tool_name="camera_tool",
-            tool_call_id="camera-call",
-            tool_arguments='{"question": "What is the user holding?"}',
-        ),
-        json.dumps({"question": "What is the user holding?"}),
-    )
+    with caplog.at_level(logging.INFO, logger="reachy_mini_conversation_app.tools.camera"):
+        result = await camera.on_invoke_tool(
+            ToolContext(
+                dependencies,
+                tool_name="camera_tool",
+                tool_call_id="camera-call",
+                tool_arguments='{"question": "What is the user holding?"}',
+            ),
+            json.dumps({"question": "What is the user holding?"}),
+        )
 
     image_sender.assert_awaited_once_with("What is the user holding?", jpeg)
     assert result == {"status": "image submitted", "question": "What is the user holding?"}
     assert "base64" not in str(result)
+    assert "Submitted camera frame: jpeg_bytes=12" in caplog.messages
+    assert "What is the user holding?" not in caplog.text
+    assert "current jpeg" not in caplog.text
 
 
 @pytest.mark.asyncio

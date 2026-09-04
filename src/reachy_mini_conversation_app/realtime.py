@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from collections.abc import Callable, Iterable
 
 import numpy as np
+from pydantic import ValidationError
 from numpy.typing import NDArray
 from scipy.signal import resample_poly
 from agents.realtime import (
@@ -27,6 +28,8 @@ from agents.realtime import (
     RealtimeAudioInterrupted,
     RealtimeModelSendRawMessage,
 )
+from openai.types.realtime import RealtimeError as OpenAIRealtimeError
+from openai.types.realtime import ResponseDoneEvent
 
 from reachy_mini_conversation_app.config import (
     REALTIME_MODEL,
@@ -170,7 +173,9 @@ class RealtimeConversation:
         self._playback_tracker = RealtimePlaybackTracker()
         self._playback_interrupted = asyncio.Event()
         self._microphone_forwarding_started = False
-        self._assistant_audio_received = False
+        self._assistant_audio_item_id: str | None = None
+        self._response_started_at: dict[str, float] = {}
+        self._tool_started_at: float | None = None
         self._last_audio_send_warning_at = float("-inf")
 
     @property
@@ -199,6 +204,14 @@ class RealtimeConversation:
 
         enabled_tool_names = selected_tool_names(
             str(self.dependencies.instance_path) if self.dependencies.instance_path is not None else None
+        )
+        logger.info(
+            "Realtime configuration: model=%s voice=%s tools=%s context_tokens=%d retention_ratio=%.2f",
+            REALTIME_MODEL,
+            self.voice,
+            ",".join(enabled_tool_names),
+            CONTEXT_POST_INSTRUCTIONS_TOKENS,
+            CONTEXT_RETENTION_RATIO,
         )
         agent = create_realtime_agent(enabled_tool_names)
         run_config: RealtimeRunConfig = {
@@ -260,6 +273,8 @@ class RealtimeConversation:
                     await self._handle_event(event)
             finally:
                 self._clear_playback()
+                self._response_started_at.clear()
+                self._tool_started_at = None
                 self.dependencies.send_image = None
                 self.dependencies.movement_manager.set_listening(False)
                 self.dependencies.movement_manager.set_speaking(False)
@@ -280,6 +295,17 @@ class RealtimeConversation:
         sample_rate, samples = frame
         pcm16 = self._bridge.microphone_to_pcm16(sample_rate, samples)
         if pcm16:
+            send_started_at = time.monotonic()
+            try:
+                await session.send_audio(pcm16)
+            except Exception:
+                logger.exception(
+                    "Failed to forward microphone audio to OpenAI Realtime: input_rate=%d Hz pcm16_bytes=%d",
+                    sample_rate,
+                    len(pcm16),
+                )
+                raise
+            send_finished_at = time.monotonic()
             if not self._microphone_forwarding_started:
                 logger.info(
                     "Realtime microphone forwarding started: input_rate=%d Hz pcm16_bytes=%d",
@@ -287,13 +313,6 @@ class RealtimeConversation:
                     len(pcm16),
                 )
                 self._microphone_forwarding_started = True
-            send_started_at = time.monotonic()
-            try:
-                await session.send_audio(pcm16)
-            except Exception:
-                logger.exception("Failed to forward microphone audio to OpenAI Realtime")
-                raise
-            send_finished_at = time.monotonic()
             send_duration = send_finished_at - send_started_at
             if (
                 send_duration >= REALTIME_AUDIO_SEND_STALL_SECONDS
@@ -357,36 +376,126 @@ class RealtimeConversation:
                     samples=playback_samples,
                 )
             )
-            if not self._assistant_audio_received:
+            if self._assistant_audio_item_id != event.item_id:
+                response_started_at = self._response_started_at.get(event.audio.response_id)
                 logger.info(
-                    "Realtime assistant audio received: pcm16_bytes=%d playback_samples=%d",
+                    "Realtime assistant audio received: response_id=%s item_id=%s elapsed_since_response_ms=%s "
+                    "pcm16_bytes=%d playback_samples=%d",
+                    event.audio.response_id,
+                    event.item_id,
+                    round((time.monotonic() - response_started_at) * 1000)
+                    if response_started_at is not None
+                    else None,
                     len(event.audio.data),
                     playback_samples.size,
                 )
-                self._assistant_audio_received = True
+                self._assistant_audio_item_id = event.item_id
         elif isinstance(event, RealtimeAudioInterrupted):
+            logger.info(
+                "Realtime audio interrupted: item_id=%s pending_output_chunks=%d",
+                event.item_id,
+                self.output_queue.qsize(),
+            )
             self.dependencies.movement_manager.set_speaking(False)
             self.dependencies.movement_manager.set_listening(True)
             self._clear_playback()
             self._mark_activity("listening")
-        elif isinstance(event, RealtimeRawModelEvent) and event.data.type == "raw_server_event":
-            raw_server_event: object = event.data.data
-            if isinstance(raw_server_event, dict):
+        elif isinstance(event, RealtimeRawModelEvent):
+            if event.data.type == "connection_status":
+                logger.info("Realtime transport: status=%s", event.data.status)
+            elif event.data.type == "turn_started":
+                if event.data.response_id is not None:
+                    self._response_started_at[event.data.response_id] = time.monotonic()
+                logger.info("Realtime response started: response_id=%s", event.data.response_id)
+            elif event.data.type == "raw_server_event":
+                raw_server_event: object = event.data.data
+                if not isinstance(raw_server_event, dict):
+                    return
                 event_type: object = raw_server_event.get("type")
-                if event_type == "input_audio_buffer.speech_started":
-                    self._mark_activity("listening")
-                elif event_type == "input_audio_buffer.speech_stopped":
-                    self._mark_activity("thinking")
+                if event_type in ("input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped"):
+                    logger.info("Realtime VAD: event=%s item_id=%s", event_type, raw_server_event.get("item_id"))
+                    self._mark_activity(
+                        "listening" if event_type == "input_audio_buffer.speech_started" else "thinking"
+                    )
+                elif event_type == "session.created":
+                    session_metadata: object = raw_server_event.get("session")
+                    if isinstance(session_metadata, dict):
+                        logger.info("Realtime session created: session_id=%s", session_metadata.get("id"))
+                elif event_type == "response.done":
+                    try:
+                        response = ResponseDoneEvent.model_validate(raw_server_event).response
+                    except ValidationError as error:
+                        logger.warning(
+                            "Cannot read Realtime response.done diagnostics: errors=%s",
+                            error.errors(include_input=False, include_context=False, include_url=False),
+                        )
+                        return
+                    response_started_at = self._response_started_at.pop(response.id, None) if response.id else None
+                    details = response.status_details
+                    response_error = details.error if details else None
+                    usage = response.usage
+                    input_details = usage.input_token_details if usage else None
+                    logger.log(
+                        logging.WARNING if response.status in ("failed", "incomplete") else logging.INFO,
+                        "Realtime response finished: response_id=%s status=%s duration_ms=%s reason=%s "
+                        "error_code=%s error_type=%s input_tokens=%s cached_tokens=%s output_tokens=%s",
+                        response.id,
+                        response.status,
+                        round((time.monotonic() - response_started_at) * 1000)
+                        if response_started_at is not None
+                        else None,
+                        details.reason if details else None,
+                        response_error.code if response_error else None,
+                        response_error.type if response_error else None,
+                        usage.input_tokens if usage else None,
+                        input_details.cached_tokens if input_details else None,
+                        usage.output_tokens if usage else None,
+                    )
         elif isinstance(event, RealtimeAudioEnd):
             self.output_queue.put_nowait(None)
         elif isinstance(event, RealtimeToolStart):
+            self._tool_started_at = time.monotonic()
             logger.info("Tool started: %s", event.tool.name)
             self._mark_activity("thinking")
         elif isinstance(event, RealtimeToolEnd):
-            logger.info("Tool finished: %s", event.tool.name)
+            output: object = event.output
+            failed = isinstance(output, dict) and "error" in output
+            logger.log(
+                logging.WARNING if failed else logging.INFO,
+                "Tool finished: %s outcome=%s duration_ms=%s error=%s",
+                event.tool.name,
+                "error" if failed else "returned",
+                round((time.monotonic() - self._tool_started_at) * 1000)
+                if self._tool_started_at is not None
+                else None,
+                output.get("error") if isinstance(output, dict) else None,
+            )
+            self._tool_started_at = None
             self._mark_activity("thinking")
         elif isinstance(event, RealtimeError):
-            logger.error("Realtime session error: %s", event.error)
+            session_error: object = event.error
+            match session_error:
+                case OpenAIRealtimeError():
+                    logger.error(
+                        "Realtime session error: type=%s code=%s param=%s event_id=%s",
+                        session_error.type,
+                        session_error.code,
+                        session_error.param,
+                        session_error.event_id,
+                    )
+                case ValidationError():
+                    logger.error(
+                        "Realtime validation error: errors=%s",
+                        session_error.errors(include_input=False, include_context=False, include_url=False),
+                    )
+                case {"message": str(message)}:
+                    logger.error("Realtime SDK error: %s", message)
+                case Exception():
+                    logger.error(
+                        "Realtime session error: type=%s message=%s", type(session_error).__name__, session_error
+                    )
+                case _:
+                    logger.error("Realtime session error: unexpected_error_type=%s", type(session_error).__name__)
 
     def _clear_playback(self) -> None:
         self._playback_interrupted.set()

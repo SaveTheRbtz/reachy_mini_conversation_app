@@ -7,6 +7,7 @@ import argparse
 import threading
 from pathlib import Path
 from collections.abc import Callable, Awaitable
+from importlib.metadata import version
 
 import uvicorn
 from dotenv import load_dotenv
@@ -18,6 +19,7 @@ from reachy_mini_conversation_app.moves import MovementManager
 from reachy_mini_conversation_app.utils import parse_args, setup_logger, log_connection_troubleshooting
 from reachy_mini_conversation_app.config import (
     REALTIME_MODEL,
+    config,
     get_default_voice,
     set_instance_path,
     resolve_app_timeout_minutes,
@@ -82,6 +84,12 @@ def run(
     """Run the OpenAI Realtime conversation app."""
     logger = setup_logger(args.debug)
     logger.info("Starting Reachy Mini Conversation App with %s", REALTIME_MODEL)
+    logger.info(
+        "Runtime versions: openai=%s openai-agents=%s reachy-mini=%s",
+        version("openai"),
+        version("openai-agents"),
+        version("reachy-mini"),
+    )
     set_instance_path(instance_path)
     startup_settings = StartupSettings()
     if instance_path is not None:
@@ -117,6 +125,14 @@ def run(
     )
     output_sample_rate = robot.media.get_output_audio_samplerate()
     selected_voice = startup_settings.voice or get_session_voice(default=get_default_voice())
+    logger.info(
+        "Conversation configuration: profile=%s voice=%s camera_enabled=%s memories=%d output_sample_rate=%d Hz",
+        config.REACHY_MINI_CUSTOM_PROFILE or "default",
+        selected_voice,
+        dependencies.camera_enabled,
+        len(dependencies.memory.memories),
+        output_sample_rate,
+    )
 
     def build_conversation(voice: str) -> RealtimeConversation:
         return RealtimeConversation(

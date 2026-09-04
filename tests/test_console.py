@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
+from fastapi import FastAPI
 from agents.realtime import RealtimeAudio, RealtimeAudioEnd, RealtimeEventInfo, RealtimeModelAudioEvent
 
 import reachy_mini_conversation_app.console as console_module
@@ -72,6 +73,68 @@ async def test_voice_change_persists_and_requests_one_session_restart(tmp_path) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["remote_close", "error", "requested_restart", "stopped"])
+async def test_session_logs_end_reason_and_reconnect_delay(
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Distinguish unexpected session endings from requested restarts and stops."""
+    conversation = _conversation()
+    stream = LocalStream(_robot(), conversation_factory=MagicMock(return_value=conversation))
+    monkeypatch.setattr(console_module, "has_openai_api_key", lambda: True)
+    retry = AsyncMock()
+    monkeypatch.setattr(stream, "_wait_for_restart", retry)
+
+    async def start_up() -> None:
+        if conversation.start_up.await_count > 1 or reason == "stopped":
+            stream._stop_event.set()
+        elif reason == "requested_restart":
+            await stream.request_restart("test")
+        elif reason == "error":
+            raise ConnectionError("connection lost")
+
+    conversation.start_up = AsyncMock(side_effect=start_up)
+    with caplog.at_level(logging.INFO, logger=console_module.__name__):
+        await stream._run_session_loop()
+
+    assert any("Realtime connection attempt: attempt=1" in message for message in caplog.messages)
+    assert any(f"reason={reason} elapsed=" in message for message in caplog.messages)
+    if reason in {"remote_close", "error"}:
+        retry.assert_awaited_once_with(console_module.RETRY_DELAY_SECONDS)
+        assert any("Realtime reconnect scheduled" in message for message in caplog.messages)
+    else:
+        retry.assert_not_awaited()
+        assert not any("Realtime reconnect scheduled" in message for message in caplog.messages)
+    if reason == "error":
+        assert any(
+            "Realtime session failed: attempt=1 elapsed=" in message
+            and "error=ConnectionError: connection lost" in message
+            for message in caplog.messages
+        )
+
+
+def test_microphone_mute_logs_only_changes(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """Expose intentional microphone silence without logging repeated settings reads."""
+    settings_app = FastAPI()
+    stream = LocalStream(
+        _robot(), conversation_factory=MagicMock(return_value=_conversation()), settings_app=settings_app
+    )
+    rpc = MagicMock()
+    monkeypatch.setattr(console_module, "JsonRpcServer", lambda: rpc)
+    stream.init_settings_ui()
+    microphone = next(call.args[1] for call in rpc.register.call_args_list if call.args[0] == "conversation.mic")
+    with caplog.at_level(logging.INFO, logger=console_module.__name__):
+        for params in ({}, {"muted": True}, {"muted": True}, {"muted": False}):
+            assert microphone(params) == {"muted": params.get("muted", False)}
+
+    assert [message for message in caplog.messages if "Microphone mute changed" in message] == [
+        "Microphone mute changed: muted=True",
+        "Microphone mute changed: muted=False",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_record_loop_warns_once_when_microphone_frames_are_missing(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -117,15 +180,16 @@ async def test_record_loop_logs_and_forwards_first_microphone_frame(caplog: pyte
 
 
 @pytest.mark.asyncio
-async def test_play_loop_pushes_chunks_without_waiting_for_playback_tracking() -> None:
+async def test_play_loop_pushes_chunks_without_waiting_for_playback_tracking(caplog: pytest.LogCaptureFixture) -> None:
     """Keep the robot player fed while playback accounting follows in order."""
     conversation = _conversation()
     first = PlaybackAudio("item", 0, b"first", np.ones(19_200, dtype=np.float32))
     second = PlaybackAudio("item", 0, b"second", np.ones(19_200, dtype=np.float32))
-    pending_audio: deque[PlaybackAudio | None] = deque((first, second, None))
+    third = PlaybackAudio("next-item", 0, b"third", np.ones(19_200, dtype=np.float32))
+    pending_audio: deque[PlaybackAudio | None] = deque((first, second, third, None))
     tracking_release = asyncio.Event()
     playback_ended = asyncio.Event()
-    pushed_second = asyncio.Event()
+    pushed_third = asyncio.Event()
     tracked: list[PlaybackAudio] = []
 
     async def emit() -> PlaybackAudio | None:
@@ -144,13 +208,14 @@ async def test_play_loop_pushes_chunks_without_waiting_for_playback_tracking() -
     conversation.acknowledge_playback_end.side_effect = playback_ended.set
     robot = _robot()
     robot.media.push_audio_sample.side_effect = lambda samples: (
-        pushed_second.set() if samples is second.samples else None
+        pushed_third.set() if samples is third.samples else None
     )
     stream = LocalStream(robot, conversation_factory=MagicMock(return_value=conversation))
+    caplog.set_level(logging.INFO, logger=console_module.__name__)
 
     playback_task = asyncio.create_task(stream.play_loop())
     acknowledgement_task = asyncio.create_task(stream._acknowledge_playback_loop())
-    await asyncio.wait_for(pushed_second.wait(), timeout=1.0)
+    await asyncio.wait_for(pushed_third.wait(), timeout=1.0)
 
     assert tracked == [first]
     assert not tracking_release.is_set()
@@ -161,11 +226,15 @@ async def test_play_loop_pushes_chunks_without_waiting_for_playback_tracking() -
     acknowledgement_task.cancel()
     await asyncio.gather(playback_task, acknowledgement_task, return_exceptions=True)
 
-    assert tracked == [first, second]
+    assert tracked == [first, second, third]
+    assert [message for message in caplog.messages if "Robot audio submitted" in message] == [
+        "Robot audio submitted: item_id=item samples=19200",
+        "Robot audio submitted: item_id=next-item samples=19200",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_interruption_discards_old_tracking_before_new_audio() -> None:
+async def test_interruption_discards_old_tracking_before_new_audio(caplog: pytest.LogCaptureFixture) -> None:
     """Never report buffered chunks cleared by an interruption as played."""
     movement_manager = SimpleNamespace(set_listening=MagicMock(), set_speaking=MagicMock())
     dependencies = SimpleNamespace(
@@ -193,6 +262,7 @@ async def test_interruption_discards_old_tracking_before_new_audio() -> None:
 
     robot.media.push_audio_sample.side_effect = push_audio
     stream = LocalStream(robot, conversation_factory=MagicMock(return_value=conversation))
+    caplog.set_level(logging.INFO, logger=console_module.__name__)
     playback_task = asyncio.create_task(stream.play_loop())
     acknowledgement_task = asyncio.create_task(stream._acknowledge_playback_loop())
     await asyncio.wait_for(old_audio_pushed.wait(), timeout=1.0)
@@ -228,3 +298,4 @@ async def test_interruption_discards_old_tracking_before_new_audio() -> None:
 
     tracker.on_play_bytes.assert_called_once_with("new", 0, new_pcm16)
     robot.media.audio.clear_player.assert_called_once_with()
+    assert "Clearing robot playback: pending_acknowledgements=1" in caplog.messages

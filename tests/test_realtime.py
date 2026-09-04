@@ -5,16 +5,21 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
 from agents.realtime import (
     RealtimeAudio,
+    RealtimeError,
+    RealtimeToolEnd,
     RealtimeAudioEnd,
     RealtimeEventInfo,
+    RealtimeToolStart,
     RealtimeRawModelEvent,
     RealtimeModelAudioEvent,
     RealtimeAudioInterrupted,
     RealtimeModelSendRawMessage,
 )
-from agents.realtime.model_events import RealtimeModelRawServerEvent
+from openai.types.realtime import RealtimeError as OpenAIRealtimeError
+from agents.realtime.model_events import RealtimeModelRawServerEvent, RealtimeModelTurnStartedEvent
 
 import reachy_mini_conversation_app.realtime as realtime_module
 from reachy_mini_conversation_app.memory import MemorySnapshot
@@ -59,9 +64,14 @@ def test_audio_bridge_converts_openai_pcm_to_robot_rate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_audio_event_keeps_source_pcm_for_delayed_playback_accounting() -> None:
-    """Keep source PCM metadata until robot playback is acknowledged."""
+async def test_audio_event_preserves_playback_and_logs_once_per_item(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Preserve playback metadata and correlate first audio without per-chunk logs."""
     conversation = _conversation()
+    now = 100.0
+    monkeypatch.setattr(realtime_module, "time", SimpleNamespace(monotonic=lambda: now))
     pcm16 = np.arange(120, dtype="<i2").tobytes()
     event = RealtimeAudio(
         audio=RealtimeModelAudioEvent(
@@ -75,7 +85,19 @@ async def test_audio_event_keeps_source_pcm_for_delayed_playback_accounting() ->
         info=RealtimeEventInfo(context=MagicMock()),
     )
 
-    await conversation._handle_event(event)
+    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
+        await conversation._handle_event(
+            RealtimeRawModelEvent(
+                data=RealtimeModelTurnStartedEvent(response_id="response"),
+                info=RealtimeEventInfo(context=MagicMock()),
+            )
+        )
+        for item_id in ("item", "next-item"):
+            event.item_id = item_id
+            event.audio.item_id = item_id
+            now += 0.25
+            await conversation._handle_event(event)
+            await conversation._handle_event(event)
     queued = await conversation.emit()
 
     assert queued is not None
@@ -83,6 +105,212 @@ async def test_audio_event_keeps_source_pcm_for_delayed_playback_accounting() ->
     assert queued.content_index == 2
     assert queued.source_pcm16 == pcm16
     assert queued.samples.size == 240
+    audio_logs = [message for message in caplog.messages if "Realtime assistant audio received" in message]
+    assert len(audio_logs) == 2
+    assert "item_id=item" in audio_logs[0]
+    assert "item_id=next-item" in audio_logs[1]
+    assert all("response_id=response" in message for message in audio_logs)
+    assert "elapsed_since_response_ms=250" in audio_logs[0]
+    assert "elapsed_since_response_ms=500" in audio_logs[1]
+    assert repr(pcm16) not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "reason", "error_code", "level"),
+    [
+        ("completed", None, None, logging.INFO),
+        ("cancelled", "turn_detected", None, logging.INFO),
+        ("failed", None, "server_error", logging.WARNING),
+        ("incomplete", "max_output_tokens", None, logging.WARNING),
+    ],
+)
+async def test_response_logs_outcome_timing_and_usage_without_content(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    status: str,
+    reason: str | None,
+    error_code: str | None,
+    level: int,
+) -> None:
+    """Distinguish API failures from successful turns and normal barge-in."""
+    conversation = _conversation()
+    now = 100.0
+    monkeypatch.setattr(realtime_module, "time", SimpleNamespace(monotonic=lambda: now))
+    response = {
+        "id": "resp_test",
+        "status": status,
+        "status_details": {
+            "type": status,
+            "reason": reason,
+            "error": {"code": error_code, "type": "server_error"} if error_code else None,
+        },
+        "usage": {"input_tokens": 1234, "output_tokens": 99, "input_token_details": {"cached_tokens": 256}},
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "PRIVATE RESPONSE CONTENT"}],
+            }
+        ],
+    }
+
+    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
+        await conversation._handle_event(
+            RealtimeRawModelEvent(
+                data=RealtimeModelTurnStartedEvent(response_id="resp_test"),
+                info=RealtimeEventInfo(context=MagicMock()),
+            )
+        )
+        now = 102.0
+        await conversation._handle_event(
+            RealtimeRawModelEvent(
+                data=RealtimeModelRawServerEvent(
+                    data={"type": "response.done", "event_id": "event_test", "response": response}
+                ),
+                info=RealtimeEventInfo(context=MagicMock()),
+            )
+        )
+
+    assert any(
+        "Realtime response started" in message and "response_id=resp_test" in message for message in caplog.messages
+    )
+    finished = [record for record in caplog.records if "Realtime response finished" in record.getMessage()]
+    assert len(finished) == 1
+    assert finished[0].levelno == level
+    message = finished[0].getMessage()
+    for field in (
+        "response_id=resp_test",
+        f"status={status}",
+        f"reason={reason}",
+        f"error_code={error_code}",
+        "duration_ms=2000",
+        "input_tokens=1234",
+        "cached_tokens=256",
+        "output_tokens=99",
+    ):
+        assert field in message
+    assert "PRIVATE RESPONSE CONTENT" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_malformed_response_logging_does_not_leak_content_or_stop_playback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Keep diagnostics from exposing validation inputs or breaking audio handling."""
+    conversation = _conversation()
+    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
+        await conversation._handle_event(
+            RealtimeRawModelEvent(
+                data=RealtimeModelRawServerEvent(
+                    data={"type": "response.done", "event_id": "event_test", "response": "PRIVATE INVALID RESPONSE"}
+                ),
+                info=RealtimeEventInfo(context=MagicMock()),
+            )
+        )
+        await conversation._handle_event(
+            RealtimeAudioEnd(info=RealtimeEventInfo(context=MagicMock()), item_id="item", content_index=0)
+        )
+
+    assert sum(record.levelno == logging.WARNING for record in caplog.records) == 1
+    assert "PRIVATE INVALID RESPONSE" not in caplog.text
+    assert not any("Realtime response finished" in message for message in caplog.messages)
+    assert await conversation.emit() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "fields"),
+    [
+        (
+            OpenAIRealtimeError(
+                type="invalid_request_error",
+                code="invalid_value",
+                param="audio",
+                event_id="event_client",
+                message="PRIVATE API ERROR MESSAGE",
+            ),
+            ("type=invalid_request_error", "code=invalid_value", "param=audio", "event_id=event_client"),
+        ),
+        (
+            ValidationError.from_exception_data(
+                "RealtimeResponse",
+                [{"type": "string_type", "loc": ("response",), "input": {"content": "PRIVATE VALIDATION INPUT"}}],
+            ),
+            ("string_type", "response"),
+        ),
+        (
+            {"message": "Tool call task failed: ConnectionError", "output": "PRIVATE SDK OUTPUT"},
+            ("Tool call task failed",),
+        ),
+        (ConnectionError("Connection closed by peer"), ("type=ConnectionError", "Connection closed by peer")),
+    ],
+)
+async def test_realtime_errors_log_support_metadata_without_private_content(
+    caplog: pytest.LogCaptureFixture,
+    error: object,
+    fields: tuple[str, ...],
+) -> None:
+    """Expose support identifiers without dumping API messages or validation inputs."""
+    conversation = _conversation()
+    await conversation._handle_event(RealtimeError(error=error, info=RealtimeEventInfo(context=MagicMock())))
+
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.ERROR
+    assert all(field in caplog.text for field in fields)
+    assert "PRIVATE" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output", "outcome", "level"),
+    [
+        ({"error": "No frame available"}, "error", logging.WARNING),
+        ("PRIVATE TOOL RESULT", "returned", logging.INFO),
+    ],
+)
+async def test_tool_logs_timing_and_outcome_without_arguments_or_result(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    output: dict[str, str] | str,
+    outcome: str,
+    level: int,
+) -> None:
+    """Measure tool calls without treating returned strings as proven successes."""
+    conversation = _conversation()
+    now = 100.0
+    monkeypatch.setattr(realtime_module, "time", SimpleNamespace(monotonic=lambda: now))
+    tool = MagicMock()
+    tool.name = "test_tool"
+    started = RealtimeToolStart(
+        agent=MagicMock(),
+        tool=tool,
+        arguments='{"query":"PRIVATE TOOL ARGUMENTS"}',
+        info=RealtimeEventInfo(context=MagicMock()),
+    )
+
+    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
+        await conversation._handle_event(started)
+        now = 102.0
+        await conversation._handle_event(
+            RealtimeToolEnd(
+                agent=started.agent,
+                tool=tool,
+                arguments=started.arguments,
+                output=output,
+                info=started.info,
+            )
+        )
+
+    assert any("Tool started: test_tool" in message for message in caplog.messages)
+    finished = [record for record in caplog.records if "Tool finished: test_tool" in record.getMessage()]
+    assert len(finished) == 1
+    assert finished[0].levelno == level
+    assert f"outcome={outcome}" in finished[0].getMessage()
+    assert "duration_ms=2000" in finished[0].getMessage()
+    if isinstance(output, dict):
+        assert "error=No frame available" in finished[0].getMessage()
+    assert "PRIVATE" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -112,30 +340,50 @@ async def test_microphone_forwarding_logs_success_and_throttles_delay_warnings(
 
 
 @pytest.mark.asyncio
-async def test_vad_speech_transitions_mark_user_activity(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reset inactivity only when server VAD detects user speech."""
+async def test_failed_microphone_send_does_not_log_forwarding_success(caplog: pytest.LogCaptureFixture) -> None:
+    """Report microphone forwarding only after sending a frame succeeds."""
+    conversation = _conversation()
+    send_audio = AsyncMock(side_effect=ConnectionError("Connection closed"))
+    conversation._session = SimpleNamespace(send_audio=send_audio)
+    frame = (24_000, np.ones(240, dtype=np.float32))
+
+    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
+        with pytest.raises(ConnectionError):
+            await conversation.receive(frame)
+        assert not any("Realtime microphone forwarding started" in message for message in caplog.messages)
+        send_audio.side_effect = None
+        await conversation.receive(frame)
+
+    assert sum("Realtime microphone forwarding started" in message for message in caplog.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_vad_speech_transitions_mark_user_activity(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log server-detected speech and reset inactivity without logging microphone frames."""
     conversation = _conversation()
     activity_observer = MagicMock()
     conversation.set_activity_observer(activity_observer)
-    monkeypatch.setattr(
-        realtime_module,
-        "time",
-        SimpleNamespace(monotonic=MagicMock(side_effect=[100.0, 200.0])),
-    )
+    now = 100.0
+    monkeypatch.setattr(realtime_module, "time", SimpleNamespace(monotonic=lambda: now))
 
-    for event_type in (
-        "input_audio_buffer.speech_started",
-        "input_audio_buffer.speech_stopped",
-    ):
-        await conversation._handle_event(
-            RealtimeRawModelEvent(
-                data=RealtimeModelRawServerEvent(data={"type": event_type}),
-                info=RealtimeEventInfo(context=MagicMock()),
+    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
+        for event_type, now in (
+            ("input_audio_buffer.speech_started", 100.0),
+            ("input_audio_buffer.speech_stopped", 200.0),
+        ):
+            await conversation._handle_event(
+                RealtimeRawModelEvent(
+                    data=RealtimeModelRawServerEvent(data={"type": event_type, "item_id": "user_item"}),
+                    info=RealtimeEventInfo(context=MagicMock()),
+                )
             )
-        )
 
     assert conversation.last_activity_time == 200.0
     assert activity_observer.call_args_list == [call("listening"), call("thinking")]
+    assert sum("item_id=user_item" in message for message in caplog.messages) == 2
 
 
 @pytest.mark.asyncio
