@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from PIL import Image
 from scipy.signal import resample_poly
 from agents.realtime import (
     RealtimeAudio,
@@ -444,8 +445,9 @@ async def test_synthesized_speech_uses_camera_image(tmp_path: Path) -> None:
     """Exercise spoken camera execution and image-grounded audio output."""
     memory = load_memory(tmp_path)
     dependencies, _, reachy_mini = _dependencies(tmp_path, memory)
-    camera_capture = MagicMock(return_value=BLUE_CHAIR_FIXTURE.read_bytes())
-    reachy_mini.media.get_frame_jpeg = camera_capture
+    with Image.open(BLUE_CHAIR_FIXTURE) as image:
+        camera_capture = MagicMock(return_value=np.asarray(image.convert("RGB"))[:, :, ::-1])
+    reachy_mini.media.get_frame = camera_capture
     conversation = RealtimeConversation(dependencies, voice="coral", output_sample_rate=48_000)
     camera_event: RealtimeToolEnd | None = None
     assistant_audio = bytearray()

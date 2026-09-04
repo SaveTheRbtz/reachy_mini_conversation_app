@@ -115,7 +115,7 @@ The default profile enables the following catalog. Tools → Tool access can ena
 
 | Tool | Action |
 |------|--------|
-| `camera` | Capture one frame and add it to the active Realtime conversation. |
+| `camera` | Read the current SDK camera frame, encode it as JPEG with Pillow, and add it to the active Realtime conversation. |
 | `dance` / `stop_dance` | Start or stop a queued dance. |
 | `play_emotion` / `stop_emotion` | Start or stop a recorded emotion movement. |
 | `move_head` | Move Reachy's head to a named direction. |
@@ -178,7 +178,7 @@ pytest tests/ -v
 The OpenAI integration tests exercise the production agent, hosted web search, persistent memory, PCM audio, and camera
 path through paid Realtime and Responses calls. The memory test covers Russian addition, semantic correction, forgetting,
 unsafe-data rejection, and use by a fresh Realtime session. The audio tests replay checked-in 24 kHz mono PCM speech
-fixtures through Reachy's 16 kHz stereo input; the camera test substitutes a fixed blue-chair JPEG and checks the grounded spoken reply.
+fixtures through Reachy's 16 kHz stereo input; the camera test supplies a raw frame from the blue-chair fixture, exercises JPEG encoding, and checks the grounded spoken reply.
 They are skipped by default; run them explicitly with an API key:
 
 ```bash
