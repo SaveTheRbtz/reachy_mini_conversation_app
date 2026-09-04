@@ -1,5 +1,7 @@
 import logging
+from io import BytesIO
 
+from PIL import Image
 from agents import FunctionTool, RunContextWrapper, function_tool
 
 from reachy_mini_conversation_app.tools.types import ToolResult, ToolDependencies
@@ -25,9 +27,13 @@ async def camera_tool(context: RunContextWrapper[ToolDependencies], question: st
     if dependencies.send_image is None:
         return {"error": "Camera input is unavailable before the realtime session starts"}
     try:
-        jpeg_bytes = dependencies.reachy_mini.media.get_frame_jpeg()
-        if jpeg_bytes is None:
+        frame = dependencies.reachy_mini.media.get_frame()
+        if frame is None:
+            logger.warning("No camera frame available")
             return {"error": "No frame available"}
+        with Image.fromarray(frame[:, :, ::-1]) as image, BytesIO() as jpeg_buffer:
+            image.save(jpeg_buffer, format="JPEG", quality=85)
+            jpeg_bytes = jpeg_buffer.getvalue()
         await dependencies.send_image(question.strip(), jpeg_bytes)
         logger.info("Submitted camera frame: jpeg_bytes=%d", len(jpeg_bytes))
         return {"status": "image submitted", "question": question.strip()}
