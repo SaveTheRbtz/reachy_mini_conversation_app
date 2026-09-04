@@ -183,9 +183,9 @@ async def test_record_loop_logs_and_forwards_first_microphone_frame(caplog: pyte
 async def test_play_loop_pushes_chunks_without_waiting_for_playback_tracking(caplog: pytest.LogCaptureFixture) -> None:
     """Keep the robot player fed while playback accounting follows in order."""
     conversation = _conversation()
-    first = PlaybackAudio("item", 0, b"first", np.ones(19_200, dtype=np.float32))
-    second = PlaybackAudio("item", 0, b"second", np.ones(19_200, dtype=np.float32))
-    third = PlaybackAudio("next-item", 0, b"third", np.ones(19_200, dtype=np.float32))
+    first = PlaybackAudio("item", 0, np.ones(19_200, dtype=np.float32))
+    second = PlaybackAudio("item", 0, np.ones(19_200, dtype=np.float32))
+    third = PlaybackAudio("next-item", 0, np.ones(19_200, dtype=np.float32))
     pending_audio: deque[PlaybackAudio | None] = deque((first, second, third, None))
     tracking_release = asyncio.Event()
     playback_ended = asyncio.Event()
@@ -245,14 +245,14 @@ async def test_interruption_discards_old_tracking_before_new_audio(caplog: pytes
     )
     conversation = RealtimeConversation(dependencies, voice="marin", output_sample_rate=48_000)
     conversation._session = SimpleNamespace(interrupt=AsyncMock())
-    old_first = PlaybackAudio("old", 0, b"old-first", np.ones(48_000, dtype=np.float32))
-    old_second = PlaybackAudio("old", 0, b"old-second", np.ones(48_000, dtype=np.float32))
+    old_first = PlaybackAudio("old", 0, np.ones(48_000, dtype=np.float32))
+    old_second = PlaybackAudio("old", 0, np.ones(48_000, dtype=np.float32))
     conversation.output_queue.put_nowait(old_first)
     conversation.output_queue.put_nowait(old_second)
     old_audio_pushed = asyncio.Event()
     new_audio_tracked = asyncio.Event()
     tracker = MagicMock()
-    tracker.on_play_bytes.side_effect = lambda *_args: new_audio_tracked.set()
+    tracker.on_play_ms.side_effect = lambda *_args: new_audio_tracked.set()
     conversation._playback_tracker = tracker
     robot = _robot()
 
@@ -296,6 +296,6 @@ async def test_interruption_discards_old_tracking_before_new_audio(caplog: pytes
     acknowledgement_task.cancel()
     await asyncio.gather(playback_task, acknowledgement_task, return_exceptions=True)
 
-    tracker.on_play_bytes.assert_called_once_with("new", 0, new_pcm16)
+    tracker.on_play_ms.assert_called_once_with("new", 0, 20.0)
     robot.media.audio.clear_player.assert_called_once_with()
     assert "Clearing robot playback: pending_acknowledgements=1" in caplog.messages

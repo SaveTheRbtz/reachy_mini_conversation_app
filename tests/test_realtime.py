@@ -3,6 +3,7 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
+import soxr
 import numpy as np
 import pytest
 from pydantic import ValidationError
@@ -36,19 +37,31 @@ def _conversation(output_rate: int = 48_000) -> RealtimeConversation:
     return RealtimeConversation(dependencies, voice="marin", output_sample_rate=output_rate)
 
 
+def _audio_event(pcm16: bytes, *, item_id: str = "item", content_index: int = 0) -> RealtimeAudio:
+    return RealtimeAudio(
+        audio=RealtimeModelAudioEvent(
+            data=pcm16, response_id="response", item_id=item_id, content_index=content_index
+        ),
+        item_id=item_id,
+        content_index=content_index,
+        info=RealtimeEventInfo(context=MagicMock()),
+    )
+
+
 def test_audio_bridge_converts_stereo_float_to_24khz_pcm16() -> None:
     """Convert robot stereo input to the Realtime PCM format."""
     bridge = StreamingAudioBridge(output_sample_rate=48_000)
     stereo = np.stack(
         (
-            np.linspace(-0.5, 0.5, 160, dtype=np.float32),
-            np.linspace(0.5, -0.5, 160, dtype=np.float32),
+            np.linspace(-0.5, 0.5, 1600, dtype=np.float32),
+            np.linspace(0.5, -0.5, 1600, dtype=np.float32),
         )
     )
 
     pcm16 = bridge.microphone_to_pcm16(16_000, stereo)
 
-    assert len(pcm16) == 240 * 2
+    assert 0 < len(pcm16) < 2400 * 2
+    assert not np.frombuffer(pcm16, dtype="<i2").any()
     assert np.frombuffer(pcm16, dtype="<i2").dtype == np.dtype("int16")
 
 
@@ -57,10 +70,47 @@ def test_audio_bridge_converts_openai_pcm_to_robot_rate() -> None:
     bridge = StreamingAudioBridge(output_sample_rate=48_000)
     pcm16 = np.arange(240, dtype="<i2").tobytes()
 
-    playback = bridge.pcm16_to_playback(pcm16)
+    playback = bridge.pcm16_to_playback(pcm16, last=True)
 
     assert playback.dtype == np.float32
     assert playback.shape == (480,)
+
+
+@pytest.mark.parametrize("output_rate", [16_000, 48_000])
+@pytest.mark.parametrize("chunk_samples", [137, 2400, 9600])
+def test_playback_resampling_matches_continuous_audio(output_rate: int, chunk_samples: int) -> None:
+    """Preserve waveform continuity and duration regardless of incoming chunk boundaries."""
+    bridge = StreamingAudioBridge(output_sample_rate=output_rate)
+    pcm16 = (np.sin(np.arange(24_000) * 2 * np.pi * 440 / 24_000) * 16_000).astype("<i2")
+    chunks = [
+        bridge.pcm16_to_playback(pcm16[offset : offset + chunk_samples].tobytes())
+        for offset in range(0, pcm16.size, chunk_samples)
+    ]
+    flushed = bridge.pcm16_to_playback(b"", last=True)
+    assert flushed.size > 0
+    playback = np.concatenate((*chunks, flushed))
+    expected = soxr.resample(pcm16.astype(np.float32) / 32768.0, 24_000, output_rate)
+
+    assert playback.size == output_rate
+    np.testing.assert_allclose(playback, expected, atol=1e-6)
+    assert bridge.pcm16_to_playback(b"", last=True).size == 0
+
+
+def test_microphone_resampling_stays_continuous_through_silence() -> None:
+    """Preserve input phase across live frames while silence carries the buffered speech tail."""
+    bridge = StreamingAudioBridge(output_sample_rate=16_000)
+    signal = np.sin(np.arange(16_000) * 2 * np.pi * 440 / 16_000).astype(np.float32) / 2
+    microphone = np.concatenate((signal, np.zeros(4096, dtype=np.float32)))
+    stereo = np.column_stack((microphone, microphone))
+    pcm16 = b"".join(
+        bridge.microphone_to_pcm16(16_000, stereo[offset : offset + 1024])
+        for offset in range(0, stereo.shape[0], 1024)
+    )
+    actual = np.frombuffer(pcm16, dtype="<i2")
+    expected = np.asarray(np.clip(soxr.resample(microphone, 16_000, 24_000), -1.0, 1.0) * 32767, dtype="<i2")
+
+    assert 24_000 < actual.size <= expected.size
+    np.testing.assert_allclose(actual, expected[: actual.size], atol=1)
 
 
 @pytest.mark.asyncio
@@ -72,7 +122,7 @@ async def test_audio_event_preserves_playback_and_logs_once_per_item(
     conversation = _conversation()
     now = 100.0
     monkeypatch.setattr(realtime_module, "time", SimpleNamespace(monotonic=lambda: now))
-    pcm16 = np.arange(120, dtype="<i2").tobytes()
+    pcm16 = np.arange(1200, dtype="<i2").tobytes()
     event = RealtimeAudio(
         audio=RealtimeModelAudioEvent(
             data=pcm16,
@@ -98,13 +148,13 @@ async def test_audio_event_preserves_playback_and_logs_once_per_item(
             now += 0.25
             await conversation._handle_event(event)
             await conversation._handle_event(event)
+            await conversation._handle_event(RealtimeAudioEnd(info=event.info, item_id=item_id, content_index=2))
     queued = await conversation.emit()
 
     assert queued is not None
     assert queued.item_id == "item"
     assert queued.content_index == 2
-    assert queued.source_pcm16 == pcm16
-    assert queued.samples.size == 240
+    assert 0 < queued.samples.size < 2400
     audio_logs = [message for message in caplog.messages if "Realtime assistant audio received" in message]
     assert len(audio_logs) == 2
     assert "item_id=item" in audio_logs[0]
@@ -208,6 +258,7 @@ async def test_malformed_response_logging_does_not_leak_content_or_stop_playback
                 info=RealtimeEventInfo(context=MagicMock()),
             )
         )
+        await conversation._handle_event(_audio_event(np.zeros(24, dtype="<i2").tobytes()))
         await conversation._handle_event(
             RealtimeAudioEnd(info=RealtimeEventInfo(context=MagicMock()), item_id="item", content_index=0)
         )
@@ -215,6 +266,9 @@ async def test_malformed_response_logging_does_not_leak_content_or_stop_playback
     assert sum(record.levelno == logging.WARNING for record in caplog.records) == 1
     assert "PRIVATE INVALID RESPONSE" not in caplog.text
     assert not any("Realtime response finished" in message for message in caplog.messages)
+    audio = await conversation.emit()
+    assert audio is not None
+    assert audio.samples.size == 48
     assert await conversation.emit() is None
 
 
@@ -388,11 +442,13 @@ async def test_vad_speech_transitions_mark_user_activity(
 
 @pytest.mark.asyncio
 async def test_audio_end_defers_listening_until_playback_tracking() -> None:
-    """Keep the listening transition ordered behind generated audio."""
-    conversation = _conversation()
+    """Flush short speech before the listening marker, accounting for only emitted samples."""
+    conversation = _conversation(output_rate=16_000)
     movement_manager = conversation.dependencies.movement_manager
-    audio = PlaybackAudio("item", 0, b"\x00\x00", np.zeros(1, dtype=np.float32))
-    conversation.output_queue.put_nowait(audio)
+    pcm16 = np.ones(240, dtype="<i2").tobytes()
+    await conversation._handle_event(_audio_event(pcm16))
+    assert conversation.output_queue.empty()
+    assert conversation._playback_tracker.get_state()["elapsed_ms"] is None
 
     await conversation._handle_event(
         RealtimeAudioEnd(
@@ -402,16 +458,44 @@ async def test_audio_end_defers_listening_until_playback_tracking() -> None:
         )
     )
 
-    assert await conversation.emit() is audio
+    audio = await conversation.emit()
+    assert audio is not None
+    assert (audio.item_id, audio.content_index) == ("item", 0)
+    assert audio.samples.size == 160
     movement_manager.set_speaking.assert_not_called()
     assert await conversation.emit() is None
     movement_manager.set_speaking.assert_not_called()
     movement_manager.set_listening.assert_not_called()
 
+    await conversation.acknowledge_after_playback(audio)
+    assert conversation._playback_tracker.get_state()["elapsed_ms"] == pytest.approx(10.0)
     conversation.acknowledge_playback_end()
 
-    movement_manager.set_speaking.assert_called_once_with(False)
-    movement_manager.set_listening.assert_called_once_with(True)
+    assert movement_manager.set_speaking.call_args_list == [call(True), call(False)]
+    assert movement_manager.set_listening.call_args_list == [call(False), call(True)]
+
+
+@pytest.mark.asyncio
+async def test_playback_accounting_excludes_resampler_delay_until_flushed() -> None:
+    """Acknowledge emitted audio duration, adding the buffered tail only after it plays."""
+    conversation = _conversation(output_rate=16_000)
+    event = _audio_event(np.ones(4800, dtype="<i2").tobytes())
+    await conversation._handle_event(event)
+    audio = await conversation.emit()
+    assert audio is not None
+    assert 0 < audio.samples.size < 3200
+    assert conversation._playback_tracker.get_state()["elapsed_ms"] is None
+
+    await conversation.acknowledge_after_playback(audio)
+    assert conversation._playback_tracker.get_state()["elapsed_ms"] == pytest.approx(audio.samples.size / 16)
+
+    await conversation._handle_event(RealtimeAudioEnd(info=event.info, item_id="item", content_index=0))
+    tail = await conversation.emit()
+    assert tail is not None
+    assert audio.samples.size + tail.samples.size == 3200
+    await conversation.acknowledge_after_playback(tail)
+    assert conversation._playback_tracker.get_state()["elapsed_ms"] == pytest.approx(200.0)
+    assert await conversation.emit() is None
 
 
 @pytest.mark.asyncio
@@ -420,7 +504,7 @@ async def test_interruption_clears_pending_audio_and_robot_player() -> None:
     conversation = _conversation()
     clear_player = MagicMock()
     conversation.set_clear_player(clear_player)
-    conversation.output_queue.put_nowait(PlaybackAudio("item", 0, b"\x00\x00", np.zeros(1, dtype=np.float32)))
+    conversation.output_queue.put_nowait(PlaybackAudio("item", 0, np.zeros(1, dtype=np.float32)))
 
     await conversation._handle_event(
         RealtimeAudioInterrupted(
@@ -432,6 +516,27 @@ async def test_interruption_clears_pending_audio_and_robot_player() -> None:
 
     assert conversation.output_queue.empty()
     clear_player.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_interruption_discards_resampler_tail_and_stale_audio_end() -> None:
+    """Never mix an interrupted item's buffered samples into its replacement."""
+    conversation = _conversation(output_rate=16_000)
+    old_audio = _audio_event(np.full(240, 16_000, dtype="<i2").tobytes(), item_id="old")
+    await conversation._handle_event(old_audio)
+    assert conversation.output_queue.empty()
+    await conversation.interrupt()
+    for item_id in ("new", "next"):
+        await conversation._handle_event(_audio_event(np.zeros(240, dtype="<i2").tobytes(), item_id=item_id))
+        await conversation._handle_event(RealtimeAudioEnd(info=old_audio.info, item_id="old", content_index=0))
+        assert conversation.output_queue.empty()
+        await conversation._handle_event(RealtimeAudioEnd(info=old_audio.info, item_id=item_id, content_index=0))
+        audio = await conversation.emit()
+        assert audio is not None
+        assert audio.item_id == item_id
+        assert audio.samples.size == 160
+        assert not audio.samples.any()
+        assert await conversation.emit() is None
 
 
 @pytest.mark.asyncio
@@ -537,12 +642,12 @@ async def test_playback_is_reported_only_when_not_interrupted() -> None:
     conversation = _conversation()
     tracker = MagicMock()
     conversation._playback_tracker = tracker
-    audio = PlaybackAudio("item", 1, b"\x00\x00", np.zeros(1, dtype=np.float32))
+    audio = PlaybackAudio("item", 1, np.zeros(1, dtype=np.float32))
 
     await conversation.acknowledge_after_playback(audio)
-    tracker.on_play_bytes.assert_called_once_with("item", 1, b"\x00\x00")
+    tracker.on_play_ms.assert_called_once_with("item", 1, 1000 / 48_000)
 
     tracker.reset_mock()
     conversation._playback_interrupted.set()
     await conversation.acknowledge_after_playback(audio)
-    tracker.on_play_bytes.assert_not_called()
+    tracker.on_play_ms.assert_not_called()
