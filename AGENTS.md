@@ -141,7 +141,7 @@ If you change dependencies, keep `uv.lock` in sync by running `uv lock` (CI vali
 
 ## Continuous integration
 
-`.github/workflows/` holds seven workflows. Frontend, Ruff, Type check, Pytest, and uv.lock check gate every PR. The local gate above exercises the same checks.
+`.github/workflows/` holds six workflows. Frontend, Ruff, Type check, Pytest, and uv.lock check gate every PR. The local gate above exercises the same checks.
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
@@ -150,7 +150,6 @@ If you change dependencies, keep `uv.lock` in sync by running `uv lock` (CI vali
 | **Type check** (`typecheck.yml`) | push, PR | `mypy` strict |
 | **Pytest** (`pytest.yml`) | PR, push to `main` | behavior and packaging tests on Linux |
 | **uv.lock check** (`uv-lock-check.yml`) | PR | `uv.lock` matches `pyproject.toml` |
-| **Allure Report** (`allure.yml`) | push to `main`, manual | publishes test and coverage reports to GitHub Pages |
 | **Release** (`release.yml`) | tag `v*` | publishes the GitHub release |
 
 ---
