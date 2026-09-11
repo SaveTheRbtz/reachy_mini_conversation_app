@@ -141,7 +141,7 @@ If you change dependencies, keep `uv.lock` in sync by running `uv lock` (CI vali
 
 ## Continuous integration
 
-`.github/workflows/` holds nine workflows. Frontend, Ruff, Type check, Pytest, and uv.lock check gate every PR. The local gate above exercises the same checks.
+`.github/workflows/` holds eight workflows. Frontend, Ruff, Type check, Pytest, and uv.lock check gate every PR. The local gate above exercises the same checks.
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
@@ -153,7 +153,6 @@ If you change dependencies, keep `uv.lock` in sync by running `uv lock` (CI vali
 | **Allure Report** (`allure.yml`) | push to `main`, manual | publishes test and coverage reports to GitHub Pages |
 | **Release** (`release.yml`) | tag `v*` | publishes the GitHub release |
 | **Sync to HF Space** (`sync-hf-space.yml`) | tag, manual | mirrors releases to the Hugging Face Space |
-| **PR Preview** (`pr-hf-space-preview.yml`) | PR | spins up a private preview Space per PR |
 
 ---
 
