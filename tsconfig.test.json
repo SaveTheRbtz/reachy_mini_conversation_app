@@ -5,5 +5,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["frontend/src/**/*.ts", "frontend/tests/**/*.ts"]
+  "include": ["frontend/**/*.ts"]
 }

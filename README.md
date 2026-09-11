@@ -182,7 +182,8 @@ npm test
 ```
 
 `npm run check` checks types without emitting files; `npm run build` regenerates the browser modules.
-After committing, `npm run check:generated` verifies that the generated files match their sources.
+After committing, `npm run check:generated` rebuilds the generated directory and verifies that every output is committed.
+The frontend job in the Ruff workflow runs these checks on pull requests and relevant pushes.
 
 Run the complete local gate before review:
 

@@ -5,7 +5,7 @@
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit && tsc -p tsconfig.test.json",
-    "check:generated": "npm run build && git diff --exit-code -- src/reachy_mini_conversation_app/static/js",
+    "check:generated": "node --experimental-strip-types frontend/check-generated.ts",
     "test": "npm run check && npm run build && node --experimental-strip-types --test frontend/tests/*.test.ts"
   },
   "devDependencies": {
