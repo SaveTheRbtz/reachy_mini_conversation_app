@@ -39,3 +39,4 @@
 *.vis lfs
 *.db lfs
 *.ply lfs
+src/reachy_mini_conversation_app/static/js/** linguist-generated=true

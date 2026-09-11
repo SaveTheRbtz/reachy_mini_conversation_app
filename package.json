@@ -1,0 +1,15 @@
+{
+  "name": "reachy-mini-conversation-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "check:generated": "node --experimental-strip-types frontend/check-generated.ts",
+    "test": "npm run check && npm run build && node --experimental-strip-types --test frontend/tests/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.2",
+    "typescript": "7.0.2"
+  }
+}

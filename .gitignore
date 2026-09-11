@@ -32,6 +32,9 @@ coverage.xml
 .ruff_cache/
 .mypy_cache/
 
+# Frontend dependencies
+node_modules/
+
 # IDE
 .vscode/
 .idea/

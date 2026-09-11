@@ -1,212 +1,110 @@
-/** Modal to create or edit a personality. */
-
 import { h, prettifyProfileName } from "../ui.js";
-
 const NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
-
-/**
- * @param {{
- *   mode?: "create" | "edit",
- *   initial?: { name?: string, instructions?: string, greeting?: string },
- *   signal?: AbortSignal,
- * }} [options]
- * @returns {Promise<{ name: string, instructions: string, greeting: string }|null>}
- */
-export function openProfileModal({ mode = "create", initial = {}, signal } = {}) {
-  const isEdit = mode === "edit";
-
-  return new Promise((resolve) => {
-    if (signal?.aborted) {
-      resolve(null);
-      return;
-    }
-
-    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const overlay = buildOverlay();
-    const dialog = buildDialog({ isEdit, initial });
-    overlay.appendChild(dialog);
-    document.body.appendChild(overlay);
-
-    // Focus the first editable field on next paint (the name in create mode, the textarea in edit).
-    requestAnimationFrame(() => {
-      const target = isEdit ? dialog.querySelector("textarea") : dialog.querySelector("input");
-      target?.focus();
-    });
-
-    let settled = false;
-    function close(value) {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (returnFocus?.isConnected) returnFocus.focus();
-      resolve(value);
-    }
-
-    function onKeydown(event) {
-      if (event.key === "Escape") {
-        close(null);
-        return;
-      }
-      if (event.key === "Tab") {
-        const focusable = Array.from(
-          dialog.querySelectorAll('button, input, textarea, select, [tabindex]:not([tabindex="-1"])')
-        ).filter((el) => !el.disabled);
-        if (focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (event.shiftKey) {
-          if (document.activeElement === first) {
-            event.preventDefault();
-            last.focus();
-          }
-        } else {
-          if (document.activeElement === last) {
-            event.preventDefault();
-            first.focus();
-          }
+export function openProfileModal(options = {}) {
+    const { signal } = options;
+    const isEdit = options.mode === "edit";
+    const initial = options.mode === "edit" ? options.initial : { name: "", instructions: "", greeting: "" };
+    return new Promise((resolve) => {
+        if (signal?.aborted) {
+            resolve(null);
+            return;
         }
-      }
-    }
-
-    function onAbort() {
-      close(null);
-    }
-
-    function cleanup() {
-      window.removeEventListener("keydown", onKeydown);
-      signal?.removeEventListener("abort", onAbort);
-      overlay.remove();
-    }
-
-    overlay.addEventListener("click", (event) => {
-      if (event.target === overlay) close(null);
-    });
-
-    window.addEventListener("keydown", onKeydown);
-    signal?.addEventListener("abort", onAbort, { once: true });
-
-    dialog.querySelector("[data-action='cancel']").addEventListener("click", () => close(null));
-
-    const errorBox = dialog.querySelector(".modal__error");
-    dialog.querySelectorAll("input, textarea").forEach((field) => {
-      field.addEventListener("input", () => errorBox.classList.remove("is-visible"));
-    });
-
-    dialog.querySelector("form").addEventListener("submit", (event) => {
-      event.preventDefault();
-      const formData = new FormData(event.target);
-      // The name is locked in edit mode (renaming would mean a new profile dir), so keep the original.
-      const name = isEdit ? String(initial.name || "") : String(formData.get("name") || "").trim();
-      const instructions = String(formData.get("instructions") || "").trim();
-      const greeting = String(formData.get("greeting") || "").trim();
-
-      if (!isEdit) {
-        if (!name) return showError(errorBox, "Please pick a name.");
-        if (!NAME_PATTERN.test(name)) {
-          return showError(errorBox, "Use only letters, numbers, dashes or underscores.");
-        }
-      }
-      if (!instructions) return showError(errorBox, "Please write some instructions.");
-
-      close({ name, instructions, greeting });
-    });
-  });
-}
-
-function buildOverlay() {
-  return h("div", {
-    class: "modal-overlay",
-    role: "presentation",
-  });
-}
-
-function buildDialog({ isEdit, initial }) {
-  return h(
-    "div",
-    {
-      class: "modal",
-      role: "dialog",
-      "aria-modal": "true",
-      "aria-labelledby": "custom-profile-title",
-    },
-    h(
-      "header",
-      { class: "modal__header" },
-      h(
-        "h2",
-        { id: "custom-profile-title", class: "modal__title" },
-        isEdit ? `Edit ${prettifyProfileName(initial.name || "personality")}` : "Create a custom personality"
-      ),
-      h(
-        "p",
-        { class: "modal__subtitle" },
-        "Define how Reachy should behave and greet people."
-      )
-    ),
-    h(
-      "form",
-      { class: "modal__form" },
-      h(
-        "label",
-        { class: "modal__field" },
-        h("span", { class: "modal__label" }, "Name"),
-        h("input", {
-          type: "text",
-          name: "name",
-          required: isEdit ? null : "required",
-          readonly: isEdit ? "readonly" : null,
-          autocomplete: "off",
-          spellcheck: "false",
-          placeholder: "e.g. zen_master",
-          pattern: "[a-zA-Z0-9_-]+",
-          value: isEdit ? initial.name || "" : null,
-          class: ["modal__input", isEdit && "is-readonly"],
-        })
-      ),
-      h(
-        "label",
-        { class: "modal__field" },
-        h("span", { class: "modal__label" }, "Instructions"),
-        h(
-          "textarea",
-          {
+        const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const nameInput = h("input", {
+            type: "text",
+            name: "name",
+            required: !isEdit,
+            readonly: isEdit,
+            autocomplete: "off",
+            spellcheck: "false",
+            placeholder: "e.g. zen_master",
+            pattern: "[a-zA-Z0-9_-]+",
+            value: initial.name,
+            class: ["modal__input", isEdit && "is-readonly"],
+        });
+        const instructionsInput = h("textarea", {
             name: "instructions",
-            required: "required",
+            required: true,
             rows: "8",
-            placeholder:
-              "You are a calm, slow-speaking zen guide. Pause between sentences. Encourage the user to breathe.",
+            placeholder: "You are a calm, slow-speaking zen guide. Pause between sentences. Encourage the user to breathe.",
             class: "modal__textarea",
-          },
-          initial.instructions || ""
-        )
-      ),
-      h(
-        "label",
-        { class: "modal__field" },
-        h("span", { class: "modal__label" }, "Startup greeting prompt"),
-        h(
-          "textarea",
-          {
+        }, initial.instructions);
+        const greetingInput = h("textarea", {
             name: "greeting",
             rows: "3",
             placeholder: "Start the conversation with a short greeting in character.",
             class: "modal__textarea",
-          },
-          initial.greeting || ""
-        )
-      ),
-      h("p", { class: "modal__error", role: "alert", "aria-live": "polite" }),
-      h(
-        "div",
-        { class: "modal__actions" },
-        h("button", { type: "button", class: "btn btn--ghost", "data-action": "cancel" }, "Cancel"),
-        h("button", { type: "submit", class: "btn btn--primary" }, isEdit ? "Save changes" : "Create & start")
-      )
-    )
-  );
+        }, initial.greeting);
+        const errorBox = h("p", { class: "modal__error", role: "alert", "aria-live": "polite" });
+        const cancelButton = h("button", { type: "button", class: "btn btn--ghost" }, "Cancel");
+        const submitButton = h("button", { type: "submit", class: "btn btn--primary" }, isEdit ? "Save changes" : "Create & start");
+        const fields = [
+            { input: nameInput, label: "Name" },
+            { input: instructionsInput, label: "Instructions" },
+            { input: greetingInput, label: "Startup greeting prompt" },
+        ];
+        const form = h("form", { class: "modal__form" }, ...fields.map(({ input, label }) => h("label", { class: "modal__field" }, h("span", { class: "modal__label" }, label), input)), errorBox, h("div", { class: "modal__actions" }, cancelButton, submitButton));
+        const dialog = h("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": "custom-profile-title" }, h("header", { class: "modal__header" }, h("h2", { id: "custom-profile-title", class: "modal__title" }, isEdit ? `Edit ${prettifyProfileName(initial.name)}` : "Create a custom personality"), h("p", { class: "modal__subtitle" }, "Define how Reachy should behave and greet people.")), form);
+        const overlay = h("div", { class: "modal-overlay", role: "presentation" }, dialog);
+        document.body.appendChild(overlay);
+        requestAnimationFrame(() => (isEdit ? instructionsInput : nameInput).focus());
+        let settled = false;
+        function close(value) {
+            if (settled)
+                return;
+            settled = true;
+            window.removeEventListener("keydown", onKeydown);
+            signal?.removeEventListener("abort", onAbort);
+            overlay.remove();
+            if (returnFocus?.isConnected)
+                returnFocus.focus();
+            resolve(value);
+        }
+        function onKeydown(event) {
+            if (event.key === "Escape") {
+                close(null);
+            }
+            else if (event.key === "Tab") {
+                if (event.shiftKey && document.activeElement === nameInput) {
+                    event.preventDefault();
+                    submitButton.focus();
+                }
+                else if (!event.shiftKey && document.activeElement === submitButton) {
+                    event.preventDefault();
+                    nameInput.focus();
+                }
+            }
+        }
+        function onAbort() {
+            close(null);
+        }
+        overlay.addEventListener("click", (event) => {
+            if (event.target === overlay)
+                close(null);
+        });
+        window.addEventListener("keydown", onKeydown);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        cancelButton.addEventListener("click", () => close(null));
+        for (const { input } of fields) {
+            input.addEventListener("input", () => errorBox.classList.remove("is-visible"));
+        }
+        form.addEventListener("submit", (event) => {
+            event.preventDefault();
+            const name = isEdit ? initial.name : nameInput.value.trim();
+            const instructions = instructionsInput.value.trim();
+            const greeting = greetingInput.value.trim();
+            if (!isEdit && !name)
+                return showError(errorBox, "Please pick a name.");
+            if (!isEdit && !NAME_PATTERN.test(name)) {
+                return showError(errorBox, "Use only letters, numbers, dashes or underscores.");
+            }
+            if (!instructions)
+                return showError(errorBox, "Please write some instructions.");
+            close({ name, instructions, greeting });
+        });
+    });
 }
-
 function showError(errorBox, message) {
-  errorBox.textContent = message;
-  errorBox.classList.add("is-visible");
+    errorBox.textContent = message;
+    errorBox.classList.add("is-visible");
 }
