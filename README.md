@@ -226,20 +226,16 @@ building a wheel from the source distribution reuses those files. CI builds from
 contracts, and uploads installable distributions for seven days. GitHub releases attach both distributions. Hugging Face
 sync publishes the extracted source distribution so the Reachy SDK can install it without frontend build tools.
 
-The Frontend workflow checks formatting, strict types, schemas, code generation, and the production build.
-`npm run test:api` runs generated-client tests; `npm run test:e2e` runs Playwright desktop/mobile tests.
-Both run against the production Python API,
-storage, and conversation/audio loops. Each test gets an isolated temporary instance;
-only robot hardware and OpenAI I/O are simulated. Tests cover saved state, tool inheritance, reconnects, stalled calls,
-unsaved drafts, and command counts to detect unintended retries. Failed browser tests retain screenshots, traces, and video
-under `test-results/` and are uploaded to GitHub as `browser-failures` for seven days. Handwritten Python remains under
-strict mypy; the generated Connect interfaces need a narrowly scoped exception for their upstream unparameterized codec
-annotations.
+The [testing guide](tests/README.md) defines coverage ownership, fixture and concurrency rules, framework choices,
+commands, and the research behind them. The default `pytest` suite checks application behavior and local SDK integration;
+`pytest -m packaging` runs clean-build and installed-package checks separately. Vitest runs frontend behavior and
+cross-language Connect tests; Playwright runs the packaged SPA against an isolated production Python backend.
+Only robot hardware and OpenAI I/O are simulated in those browser tests.
 
-Every pull request runs Frontend, Ruff, Type check, Pytest, and `uv.lock` checks. Pytest runs on Linux, macOS, and
-Windows and builds a wheel from a source distribution, verifying the packaged SPA files and Windows path limits.
-The test suite uses simulated external services and does not download the emotions dataset. All five workflows
-also support manual runs against a selected branch.
+Every pull request runs Frontend, Ruff, Type check, Pytest, and `uv.lock` checks. Python behavior and packaging run on
+Linux, macOS, and Windows. CI builds generated contracts from clean source and retains browser failure recordings for
+seven days. Paid OpenAI evaluations live under `tests/live/` and require explicit selection with `pytest -m live` and
+an `OPENAI_API_KEY`; they are excluded from the ordinary local and CI gates.
 
 Run the complete local gate before review:
 
@@ -247,17 +243,11 @@ Run the complete local gate before review:
 ruff check . --fix
 ruff format .
 mypy --pretty --show-error-codes
-pytest tests/ -v
-```
-
-The OpenAI integration tests exercise the production Live session, delegated robot tools, hosted search, memory
-preservation, correction and forgetting, homework guidance, PCM audio, and camera vision through paid Live and Responses calls. They replay
-checked-in 24 kHz mono PCM speech through Reachy's 16 kHz stereo input, check grounded spoken replies, and verify
-session finalization. Camera tests ask five visual questions in one session and read small identifiers from a synthetic label.
-They are skipped by default; run them explicitly with an API key:
-
-```bash
-RUN_OPENAI_ITESTS=1 OPENAI_API_KEY=sk-... pytest tests/integration/ -v
+pytest
+pytest -m packaging
+npm test
+npm run test:e2e
+uv lock --check
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and [AGENTS.md](AGENTS.md) for repository-specific standards.
