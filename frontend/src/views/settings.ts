@@ -1,13 +1,13 @@
 /** Settings view for the OpenAI Live connection and voice. */
 
-import { describeError, rpcCall, untilReady } from "../api.ts";
-import type { ConversationStatus } from "../contracts.ts";
+import { api, describeError, untilReady } from "../api.ts";
+import { Conversation_ConnectionState as ConnectionState, type Conversation, type Settings } from "../gen/reachy/conversation/v1/api_pb.ts";
 import type { RouterContext } from "../router.ts";
 import { h } from "../ui.ts";
 
 export async function mountSettingsView({ outlet, signal }: RouterContext) {
-  const connectionSection = buildConnectionSection(refreshStatus);
-  const voiceSection = buildVoiceSection();
+  const connectionSection = buildConnectionSection(refreshStatus, signal);
+  const voiceSection = buildVoiceSection(signal, refreshStatus);
   const statusSection = buildStatusSection();
 
   outlet.replaceChildren(
@@ -30,17 +30,20 @@ export async function mountSettingsView({ outlet, signal }: RouterContext) {
 
   async function refreshStatus() {
     try {
-      const status = await untilReady(() => rpcCall("conversation.status"), signal);
+      const [conversation, settings] = await untilReady(() => Promise.all([
+        api.getConversation({ name: "conversation" }, { signal }),
+        api.getSettings({ name: "settings" }, { signal }),
+      ]), signal);
       if (signal.aborted) return;
-      statusSection.render(status);
-      connectionSection.syncFromStatus(status);
+      statusSection.render(conversation, settings);
+      connectionSection.syncFromStatus(settings);
     } catch (error) {
       if (!signal.aborted) statusSection.renderUnavailable(error);
     }
   }
 }
 
-function buildConnectionSection(onSaved: () => Promise<void>) {
+function buildConnectionSection(onSaved: () => Promise<void>, signal: AbortSignal) {
   const apiKey = h("input", {
     type: "password",
     name: "api_key",
@@ -82,13 +85,17 @@ function buildConnectionSection(onSaved: () => Promise<void>) {
     form.setAttribute("aria-busy", "true");
     status.classList.remove("is-error");
     status.textContent = "Saving and reconnecting…";
+    let saved = false;
     try {
-      await rpcCall("openai.config", { api_key: apiKey.value });
+      await api.setSettingsApiKey({ name: "settings", apiKey: apiKey.value }, { signal });
       apiKey.value = "";
+      saved = true;
+      await api.restartConversation({ name: "conversation" }, { signal });
+      if (signal.aborted) return;
       status.textContent = "Saved. The Live session is reconnecting.";
       await onSaved();
     } catch (error) {
-      status.textContent = `Failed to save: ${describeError(error)}`;
+      status.textContent = `${saved ? "API key saved, but could not reconnect" : "Failed to save"}: ${describeError(error)}`;
       status.classList.add("is-error");
     } finally {
       submitButton.disabled = false;
@@ -99,13 +106,13 @@ function buildConnectionSection(onSaved: () => Promise<void>) {
 
   return {
     element,
-    syncFromStatus(payload: ConversationStatus) {
-      apiKey.placeholder = payload.has_key ? "Configured" : "sk-…";
+    syncFromStatus(payload: Settings) {
+      apiKey.placeholder = payload.apiKeyConfigured ? "Configured" : "sk-…";
     },
   };
 }
 
-function buildVoiceSection() {
+function buildVoiceSection(signal: AbortSignal, onSaved: () => Promise<void>) {
   const select = h(
     "select",
     { class: "settings-select", name: "voice", disabled: "disabled" },
@@ -133,21 +140,29 @@ function buildVoiceSection() {
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (submitButton.disabled || !select.value) return;
+    if (submitButton.disabled) return;
     submitButton.disabled = true;
     select.disabled = true;
     form.setAttribute("aria-busy", "true");
     status.classList.remove("is-error");
     status.textContent = "Applying…";
+    let saved = false;
     try {
-      const result = await rpcCall("voices.apply", { voice: select.value });
-      status.textContent = result.status;
+      await api.updateSettings({
+        settings: { name: "settings", voiceOverride: select.value },
+        updateMask: { paths: ["voice_override"] },
+      }, { signal });
+      saved = true;
+      await api.restartConversation({ name: "conversation" }, { signal });
+      if (signal.aborted) return;
+      status.textContent = "Voice saved. The Live session is reconnecting.";
+      await onSaved();
     } catch (error) {
-      status.textContent = `Failed to apply: ${describeError(error)}`;
+      status.textContent = `${saved ? "Voice saved, but could not reconnect" : "Failed to save voice"}: ${describeError(error)}`;
       status.classList.add("is-error");
     } finally {
-      submitButton.disabled = !select.value;
-      select.disabled = !select.value;
+      submitButton.disabled = false;
+      select.disabled = false;
       form.removeAttribute("aria-busy");
     }
   });
@@ -158,8 +173,12 @@ function buildVoiceSection() {
       let voices: string[] = [];
       let current = "";
       try {
-        voices = await untilReady(() => rpcCall("voices.list"), signal);
-        current = (await rpcCall("voices.current")).voice;
+        const [capabilities, settings] = await untilReady(() => Promise.all([
+          api.getCapabilities({ name: "capabilities" }, { signal }),
+          api.getSettings({ name: "settings" }, { signal }),
+        ]), signal);
+        voices = capabilities.availableVoices;
+        current = settings.voiceOverride;
       } catch (error) {
         console.warn("Failed to load voices", error);
         voices = [];
@@ -173,6 +192,7 @@ function buildVoiceSection() {
         status.textContent = "Voices are unavailable right now.";
         return;
       }
+      select.appendChild(h("option", { value: "" }, "Use personality default"));
       for (const voice of voices) {
         const option = h("option", { value: voice }, voice);
         if (voice === current) option.selected = true;
@@ -196,23 +216,22 @@ function buildStatusSection() {
 
   return {
     element,
-    render(payload: ConversationStatus) {
-      const state = payload.connected ? "connected" : payload.connection_state;
-      const labels = {
-        connected: "Connected",
-        connecting: "Connecting…",
-        disconnected: "Disconnected",
-        not_started: "Not started",
-        waiting_for_config: "Waiting for API key",
-      };
+    render(payload: Conversation, settings: Settings) {
+      const labels = new Map<ConnectionState, string>([
+        [ConnectionState.CONNECTED, "Connected"],
+        [ConnectionState.CONNECTING, "Connecting…"],
+        [ConnectionState.DISCONNECTED, "Disconnected"],
+        [ConnectionState.NOT_STARTED, "Not started"],
+        [ConnectionState.WAITING_FOR_CONFIG, "Waiting for API key"],
+      ]);
       list.replaceChildren(
-        statusRow("API key", payload.has_key ? "Configured" : "Missing", payload.has_key ? "ok" : "warn"),
+        statusRow("API key", settings.apiKeyConfigured ? "Configured" : "Missing", settings.apiKeyConfigured ? "ok" : "warn"),
         statusRow("Model", payload.model || "-"),
         statusRow("Voice", payload.voice || "-"),
-        statusRow("Live", labels[state], state === "connected" ? "ok" : "warn")
+        statusRow("Live", labels.get(payload.connectionState) ?? "Unknown", payload.connectionState === ConnectionState.CONNECTED ? "ok" : "warn")
       );
-      if (payload.connection_error) {
-        list.appendChild(statusRow("Connection error", payload.connection_error, "warn"));
+      if (payload.connectionError) {
+        list.appendChild(statusRow("Connection error", payload.connectionError, "warn"));
       }
     },
     renderUnavailable(error: unknown) {

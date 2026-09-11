@@ -1,6 +1,6 @@
 import { h, prettifyProfileName } from "../ui.ts";
 
-const NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
+const NAME_PATTERN = /^[a-z](?:[a-z0-9-]{0,56}[a-z0-9])?$/;
 
 export interface ProfileForm {
   name: string;
@@ -32,8 +32,8 @@ export function openProfileModal(options: ProfileModalOptions = {}): Promise<Pro
       readonly: isEdit,
       autocomplete: "off",
       spellcheck: "false",
-      placeholder: "e.g. zen_master",
-      pattern: "[a-zA-Z0-9_-]+",
+      placeholder: "e.g. zen-master",
+      pattern: "[a-z][a-z0-9-]*",
       value: initial.name,
       class: ["modal__input", isEdit && "is-readonly"],
     });
@@ -132,7 +132,7 @@ export function openProfileModal(options: ProfileModalOptions = {}): Promise<Pro
 
       if (!isEdit && !name) return showError(errorBox, "Please pick a name.");
       if (!isEdit && !NAME_PATTERN.test(name)) {
-        return showError(errorBox, "Use only letters, numbers, dashes or underscores.");
+        return showError(errorBox, "Use up to 58 lowercase letters, numbers or dashes; start with a letter and end with a letter or number.");
       }
       if (!instructions) return showError(errorBox, "Please write some instructions.");
       close({ name, instructions, greeting });

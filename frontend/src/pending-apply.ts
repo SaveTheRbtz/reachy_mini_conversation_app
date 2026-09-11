@@ -1,6 +1,6 @@
-import type { RpcMethods } from "./contracts.ts";
+import type { Conversation } from "./gen/reachy/conversation/v1/api_pb.ts";
 
-type PendingApply = { name: string; promise: Promise<RpcMethods["personalities.apply"]["result"]> };
+type PendingApply = { name: string; promise: Promise<Conversation> };
 let pending: PendingApply | null = null;
 
 export function setPendingApply(entry: PendingApply | null): void {

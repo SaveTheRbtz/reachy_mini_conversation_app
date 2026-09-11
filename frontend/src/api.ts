@@ -1,210 +1,84 @@
-import type { RpcMethods, RpcNotifications } from "./contracts.ts";
+import { createClient, Code, ConnectError } from "@connectrpc/connect";
+import { createConnectTransport } from "@connectrpc/connect-web";
+import { ConversationService, type Conversation, type Profile } from "./gen/reachy/conversation/v1/api_pb.ts";
 
-const DEFAULT_TIMEOUT_MS = 8000;
-const RPC_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/rpc`;
+export const api = createClient(ConversationService, createConnectTransport({
+  baseUrl: `${location.origin}/rpc`,
+  defaultTimeoutMs: 8000,
+}));
 
-export class RpcError extends Error {
-  readonly reason: string;
-  readonly detail: string | undefined;
-
-  constructor(message: string, reason = "rpc_error", detail?: string) {
-    super(message || reason);
-    this.name = "RpcError";
-    this.reason = reason;
-    this.detail = detail;
-  }
+export async function listProfiles(signal?: AbortSignal): Promise<Profile[]> {
+  const profiles: Profile[] = [];
+  let pageToken = "";
+  do {
+    const page = await api.listProfiles({ pageToken }, { signal });
+    profiles.push(...page.profiles);
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return profiles;
 }
 
-interface PendingRequest {
-  resolve: (result: unknown) => void;
-  reject: (error: RpcError) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
-type Notification = {
-  [Method in keyof RpcNotifications]: { method: Method; params: RpcNotifications[Method] };
-}[keyof RpcNotifications];
-
-type RpcMessage = Notification | {
-  id: string | null;
-  result?: unknown;
-  error?: { message: string; data?: { reason?: string; detail?: string } };
-};
-
-let socket: WebSocket | null = null;
-let connecting: Promise<void> | null = null;
-let rpcCounter = 0;
-const pending = new Map<string, PendingRequest>();
-const subscribers: {
-  [Method in keyof RpcNotifications]: Set<(params: RpcNotifications[Method]) => void>;
-} = {
-  "rpc.connection": new Set(),
-  "conversation.activity": new Set(),
-};
-
-function connect(): Promise<void> {
-  if (socket?.readyState === WebSocket.OPEN) return Promise.resolve();
-  if (connecting) return connecting;
-  connecting = new Promise((resolve, reject) => {
-    const ws = new WebSocket(RPC_URL);
-    socket = ws;
-    const openingTimer = setTimeout(() => {
-      reject(new RpcError("timed out connecting to /rpc", "timeout"));
-      disconnected();
-      ws.close();
-    }, DEFAULT_TIMEOUT_MS);
-    ws.onopen = () => {
-      if (socket !== ws) return;
-      clearTimeout(openingTimer);
-      connecting = null;
-      resolve();
-      notify("rpc.connection", { connected: true });
-    };
-    ws.onmessage = (event: MessageEvent<string>) => {
-      if (socket !== ws) return;
-      try {
-        handleMessage(event.data);
-      } catch (error) {
-        console.warn("Invalid RPC message:", error);
-      }
-    };
-    ws.onclose = disconnected;
-
-    function disconnected(): void {
-      clearTimeout(openingTimer);
-      if (socket !== ws) return;
-      socket = null;
-      connecting = null;
-      for (const request of pending.values()) {
-        clearTimeout(request.timer);
-        request.reject(new RpcError("connection closed", "disconnected"));
-      }
-      pending.clear();
-      notify("rpc.connection", { connected: false });
-      reject(new RpcError("cannot reach /rpc", "disconnected"));
-      if (Object.values(subscribers).some((callbacks) => callbacks.size > 0)) {
-        setTimeout(() => {
-          if (Object.values(subscribers).some((callbacks) => callbacks.size > 0)) {
-            connect().catch((error: unknown) => console.warn("RPC reconnect failed:", error));
-          }
-        }, 1000);
-      }
-    }
-  });
-  return connecting;
-}
-
-function handleMessage(frame: string): void {
-  const message = JSON.parse(frame) as RpcMessage;
-  if ("method" in message) {
-    notify(message.method, message.params);
-    return;
-  }
-  if (message.id === null) return;
-  const request = pending.get(message.id);
-  if (!request) return;
-  pending.delete(message.id);
-  clearTimeout(request.timer);
-  if (message.error) {
-    request.reject(new RpcError(message.error.message, message.error.data?.reason, message.error.data?.detail));
-  } else {
-    request.resolve(message.result);
-  }
-}
-
-function notify<Method extends keyof RpcNotifications>(method: Method, params: RpcNotifications[Method]): void {
-  for (const callback of subscribers[method] ?? []) {
+export async function watchConversation(
+  signal: AbortSignal,
+  onSnapshot: (conversation: Conversation) => void,
+  onError: (error: unknown) => void,
+): Promise<void> {
+  while (!signal.aborted) {
+    let receivedAt = 0;
     try {
-      callback(params);
+      for await (const conversation of api.watchConversation({ name: "conversation" }, { signal, timeoutMs: 30000 })) {
+        receivedAt = Date.now();
+        onSnapshot(conversation);
+      }
     } catch (error) {
-      console.error(`subscribe(${method}) callback threw:`, error);
+      if (signal.aborted) return;
+      // Renew a healthy watch silently; the server sends a snapshot every five seconds.
+      if (ConnectError.from(error).code === Code.DeadlineExceeded && Date.now() - receivedAt < 10000) continue;
+      console.warn("Conversation watch failed", error);
+      onError(error);
     }
+    await waitForRetry(signal);
   }
 }
-
-type CallArguments<Method extends keyof RpcMethods> = {} extends RpcMethods[Method]["params"]
-  ? [params?: RpcMethods[Method]["params"], options?: { timeoutMs?: number }]
-  : [params: RpcMethods[Method]["params"], options?: { timeoutMs?: number }];
-
-export async function rpcCall<Method extends keyof RpcMethods>(
-  method: Method,
-  ...args: CallArguments<Method>
-): Promise<RpcMethods[Method]["result"]> {
-  const [params = {}, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}] = args;
-  await connect();
-  const ws = socket;
-  if (ws?.readyState !== WebSocket.OPEN) throw new RpcError("not connected", "disconnected");
-  const id = `ui-${++rpcCounter}`;
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      reject(new RpcError(`timed out: ${method}`, "timeout"));
-    }, timeoutMs);
-    pending.set(id, {
-      resolve: (result) => resolve(result as RpcMethods[Method]["result"]),
-      reject,
-      timer,
-    });
-    try {
-      ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
-    } catch (error) {
-      pending.delete(id);
-      clearTimeout(timer);
-      reject(error);
-    }
-  });
-}
-
-export function subscribe<Method extends keyof RpcNotifications>(
-  method: Method,
-  callback: (params: RpcNotifications[Method]) => void,
-): () => void {
-  const callbacks = subscribers[method];
-  callbacks.add(callback);
-  connect().catch((error: unknown) => console.warn("RPC connection failed:", error));
-  return () => { callbacks.delete(callback); };
-}
-
-const STARTUP_POLL_MS = 2000;
-const STARTUP_DEADLINE_MS = 90000;
 
 export async function untilReady<Result>(
   request: () => Promise<Result>,
   signal: AbortSignal,
   onRetry?: () => void,
 ): Promise<Result> {
-  const deadline = Date.now() + STARTUP_DEADLINE_MS;
+  const deadline = Date.now() + 90000;
   let notified = false;
   for (;;) {
+    signal.throwIfAborted();
     try {
       return await request();
     } catch (error) {
-      if (signal.aborted || Date.now() >= deadline) throw error;
+      const code = ConnectError.from(error).code;
+      if (signal.aborted || Date.now() >= deadline ||
+          ![Code.Unavailable, Code.DeadlineExceeded, Code.Unknown].includes(code)) throw error;
       if (!notified) {
         notified = true;
         onRetry?.();
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, STARTUP_POLL_MS));
-    if (signal.aborted) throw new Error("view unmounted");
+    await waitForRetry(signal);
   }
 }
 
-const ERROR_MESSAGES: Readonly<Record<string, string>> = {
-  invalid_openai_key: "Enter an OpenAI API key.",
-  invalid_name: "Enter a valid profile name.",
-  invalid_instructions: "Enter personality instructions.",
-  profile_exists: "A personality with this name already exists.",
-  invalid_tool_selection: "One or more selected tools are no longer available.",
-  unknown_profile: "That personality is no longer available.",
-  missing_voice: "Choose a voice first.",
-  profile_locked: "Profile switching is locked by the administrator.",
-  profile_in_use: "This personality is active or set to load at startup. Switch to another one first.",
-  not_deletable: "This personality can't be deleted.",
-  loop_unavailable: "Reachy is still starting up. Try again in a moment.",
-};
+function waitForRetry(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, 1000);
+    signal.addEventListener("abort", done, { once: true });
+    if (signal.aborted) done();
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+  });
+}
 
 export function describeError(error: unknown): string {
-  if (error instanceof RpcError) return ERROR_MESSAGES[error.reason] ?? error.detail ?? error.message;
+  if (error instanceof ConnectError) return error.rawMessage;
   return error instanceof Error ? error.message : String(error);
 }

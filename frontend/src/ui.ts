@@ -36,7 +36,7 @@ function appendChildren(parent: HTMLElement, children: readonly Child[]): void {
 }
 
 export function prettifyProfileName(name: string): string {
-  return name.replace(/^user_personalities\//, "")
+  return name.replace(/^profiles\/(?:builtin-|user-)/, "")
     .split(/[_-]/)
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))

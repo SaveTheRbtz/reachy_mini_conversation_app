@@ -1,6 +1,6 @@
 /** Home view: grid of personality cards. Select one to apply it and navigate to Talk. */
 
-import { describeError, rpcCall, untilReady } from "../api.ts";
+import { api, describeError, listProfiles, untilReady } from "../api.ts";
 import type { Navigate, RouterContext } from "../router.ts";
 import { AVATAR_BY_PROFILE, ROUTES, avatarFor } from "../constants.ts";
 import { h, prettifyProfileName } from "../ui.ts";
@@ -31,9 +31,15 @@ export async function mountHomeView({ outlet, signal, navigate }: RouterContext 
   const status = h("p", { class: "view-status", role: "status", "aria-live": "polite" });
   view.appendChild(status);
 
-  let personalities;
+  let profiles;
+  let conversation;
+  let settings;
   try {
-    personalities = await untilReady(() => rpcCall("personalities.list"), signal, () => {
+    [profiles, conversation, settings] = await untilReady(() => Promise.all([
+      listProfiles(signal),
+      api.getConversation({ name: "conversation" }, { signal }),
+      api.getSettings({ name: "settings" }, { signal }),
+    ]), signal, () => {
       grid.replaceChildren(h("p", { class: "muted" }, "Waiting for Reachy to finish starting…"));
     });
   } catch (error) {
@@ -46,17 +52,18 @@ export async function mountHomeView({ outlet, signal, navigate }: RouterContext 
   }
   if (signal.aborted) return;
 
-  const choices = personalities.choices;
-  const current = personalities.current;
-  const lockedTo = personalities.locked ? personalities.locked_to : null;
+  const current = conversation.profile;
+  const lockedTo = settings.lockedProfile;
 
   grid.replaceChildren();
-  for (const name of choices) {
+  for (const profile of profiles) {
+    const name = profile.name;
     const disabled = Boolean(lockedTo) && name !== lockedTo;
-    const editable = !personalities.locked && name.startsWith("user_personalities/");
+    const editable = !lockedTo && profile.editable;
     grid.appendChild(
       buildPersonalityCard({
         name,
+        displayName: profile.displayName,
         isActive: name === current,
         disabled,
         onSelect: () => handleSelection(name),
@@ -80,7 +87,7 @@ export async function mountHomeView({ outlet, signal, navigate }: RouterContext 
     // Talk owns the pending request so it can show connection progress immediately.
     setPendingApply(name === current ? null : {
       name,
-      promise: rpcCall("personalities.apply", { name, persist: false }),
+      promise: api.restartConversation({ name: "conversation", profile: name }),
     });
     void navigate(ROUTES.TALK);
   }
@@ -95,14 +102,17 @@ export async function mountHomeView({ outlet, signal, navigate }: RouterContext 
     status.textContent = `Saving "${created.name}"…`;
     let newName;
     try {
-      const saveResult = await rpcCall("personalities.save", {
-        name: created.name,
-        instructions: created.instructions,
-        greeting: created.greeting || null,
-        voice: "", // falls back to the app default; user can change it in Settings
-      });
+      const defaults = await api.getProfile({ name: "profiles/builtin-default" }, { signal });
+      const saveResult = await api.createProfile({
+        profileId: `user-${created.name}`,
+        profile: {
+          instructions: created.instructions,
+          greeting: created.greeting,
+          defaultToolIds: defaults.defaultToolIds,
+        },
+      }, { signal });
       if (signal.aborted) return;
-      newName = saveResult.value;
+      newName = saveResult.name;
     } catch (error) {
       if (signal.aborted) return;
       status.textContent = `Failed to create profile: ${describeError(error)}`;
@@ -110,7 +120,7 @@ export async function mountHomeView({ outlet, signal, navigate }: RouterContext 
       return;
     }
     setPersonality(newName);
-    setPendingApply({ name: newName, promise: rpcCall("personalities.apply", { name: newName, persist: false }) });
+    setPendingApply({ name: newName, promise: api.restartConversation({ name: "conversation", profile: newName }) });
     void navigate(ROUTES.TALK);
   }
 
@@ -118,7 +128,7 @@ export async function mountHomeView({ outlet, signal, navigate }: RouterContext 
     status.classList.remove("is-warning", "is-error");
     let personality;
     try {
-      personality = await rpcCall("personalities.load", { name });
+      personality = await api.getProfile({ name }, { signal });
     } catch (error) {
       if (signal.aborted) return;
       status.textContent = `Could not load "${prettifyProfileName(name)}": ${describeError(error)}`;
@@ -140,14 +150,10 @@ export async function mountHomeView({ outlet, signal, navigate }: RouterContext 
 
     status.textContent = `Saving "${prettifyProfileName(name)}"…`;
     try {
-      await rpcCall("personalities.save", {
-        // Strip the prefix: the save endpoint always writes under user_personalities/<name>.
-        name: stripUserPrefix(name),
-        instructions: edited.instructions,
-        greeting: edited.greeting,
-        voice: personality.voice,
-        overwrite: true,
-      });
+      await api.updateProfile({
+        profile: { name, instructions: edited.instructions, greeting: edited.greeting },
+        updateMask: { paths: ["instructions", "greeting"] },
+      }, { signal });
     } catch (error) {
       if (signal.aborted) return;
       status.textContent = `Failed to save: ${describeError(error)}`;
@@ -159,7 +165,7 @@ export async function mountHomeView({ outlet, signal, navigate }: RouterContext 
     // Reload a live personality so the session uses the updated instructions.
     if (name === current) {
       setPersonality(name);
-      setPendingApply({ name, promise: rpcCall("personalities.apply", { name, persist: false, force: true }) });
+      setPendingApply({ name, promise: api.restartConversation({ name: "conversation", profile: name }) });
       void navigate(ROUTES.TALK);
     } else {
       status.textContent = `Saved "${prettifyProfileName(name)}". It will apply next time you select it.`;
@@ -177,7 +183,7 @@ export async function mountHomeView({ outlet, signal, navigate }: RouterContext 
     if (!ok || signal.aborted) return;
     status.classList.remove("is-warning", "is-error");
     try {
-      await rpcCall("personalities.delete", { name });
+      await api.deleteProfile({ name }, { signal });
     } catch (error) {
       if (signal.aborted) return;
       status.textContent = `Failed to delete: ${describeError(error)}`;
@@ -192,6 +198,7 @@ export async function mountHomeView({ outlet, signal, navigate }: RouterContext 
 
 interface PersonalityCardOptions {
   name: string;
+  displayName: string;
   isActive: boolean;
   disabled: boolean;
   onSelect: () => void;
@@ -201,7 +208,7 @@ interface PersonalityCardOptions {
 }
 
 function buildPersonalityCard({
-  name, isActive, disabled, onSelect, onManageTools, onEdit, onDelete,
+  name, displayName, isActive, disabled, onSelect, onManageTools, onEdit, onDelete,
 }: PersonalityCardOptions) {
   const hasAvatar = Object.prototype.hasOwnProperty.call(AVATAR_BY_PROFILE, stripUserPrefix(name));
   const card = h(
@@ -211,7 +218,7 @@ function buildPersonalityCard({
       class: ["personality-card", isActive && "is-active", disabled && "is-disabled"],
       disabled: disabled ? "disabled" : null,
       "aria-pressed": isActive ? "true" : "false",
-      "aria-label": `Use personality ${prettifyProfileName(name)}`,
+      "aria-label": `Use personality ${displayName}`,
       onClick: disabled ? undefined : onSelect,
     },
     h(
@@ -226,7 +233,7 @@ function buildPersonalityCard({
         class: !hasAvatar ? "personality-card__avatar--fallback" : null,
       })
     ),
-    h("span", { class: "personality-card__name" }, prettifyProfileName(name)),
+    h("span", { class: "personality-card__name" }, displayName),
     isActive && checkBadge()
   );
   // Wrap so the edit/delete buttons are siblings, not nested <button>s inside the card button.
@@ -308,5 +315,5 @@ function buildCustomCard({ onClick }: { onClick: () => void }) {
 }
 
 function stripUserPrefix(name: string) {
-  return name.replace(/^user_personalities\//, "");
+  return name.replace(/^profiles\/(?:builtin-|user-)/, "");
 }

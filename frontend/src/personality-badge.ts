@@ -20,7 +20,7 @@ export function mountPersonalityBadge(headerRoot: ParentNode = document) {
 export function setPersonality(rawName: string) {
   if (!rootEl || !nameEl || !avatarImg) return;
   if (!rawName) return;
-  const cleanName = rawName.replace(/^user_personalities\//, "");
+  const cleanName = rawName.replace(/^profiles\/(?:builtin-|user-)/, "");
   nameEl.textContent = prettifyProfileName(rawName);
   avatarImg.src = avatarFor(cleanName);
 }

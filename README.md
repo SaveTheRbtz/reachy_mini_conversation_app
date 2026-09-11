@@ -165,25 +165,49 @@ You are a concise, friendly robot guide.
 
 The UI can create data-only user personalities. Managed instances store them under `user_personalities/`; standalone runs use `external_content/user_personalities/`. Per-profile tool overrides are stored in `profile_toolsets.json`. Remove `wait_for_user` from existing custom profiles and tool overrides; listening is handled by Live. Applying the active profile, voice, or tool set reconnects the one Live session.
 
+Startup profile and voice preferences are stored in `startup_settings.json` in the app instance directory, or under
+`external_content/` for standalone runs. A global voice override takes precedence over the selected profile's voice;
+clearing it restores the profile voice, falling back to the app default.
+
 Python tools are intentionally not dynamically loaded. Add a new tool as an Agents SDK `@function_tool` module under `src/reachy_mini_conversation_app/tools/`, register it in `tools/core_tools.py`, and add essential behavior tests.
 
 ## Development
 
-The browser UI is written in strict TypeScript under `frontend/src/`. Its RPC contract lives in
-`frontend/src/contracts.ts`; the Python routes define the corresponding server responses. DOM modules compile
-directly to the packaged `src/reachy_mini_conversation_app/static/js/` files. Edit the TypeScript sources and
-commit the generated JavaScript with them. Running or installing the Python app does not require Node.js.
+The browser UI is written in strict TypeScript under `frontend/src/`. Its API contract is
+[`proto/reachy/conversation/v1/api.proto`](proto/reachy/conversation/v1/api.proto).
+Buf generates Python models/service interfaces and TypeScript models/service descriptors. Connect serves unary calls
+and a conversation snapshot stream through the existing FastAPI app at `/rpc/reachy.conversation.v1.ConversationService/`.
+The frontend uses the generated client and bundles with esbuild; there is no handwritten JSON-RPC transport.
 
-For UI development, install Node.js 22 or newer and the pinned compiler, then build and test:
+The API follows Google AIP resource conventions for `conversation`, `settings`, `capabilities`, and `profiles/{profile}`.
+Updates use field masks; profile and settings writes save configuration, while `RestartConversation` explicitly applies it.
+An absent profile tool override inherits its defaults; an empty override disables all tools. Credentials are accepted by
+`SetSettingsApiKey` and never returned. Resource methods run over Connect's service/method URLs; no REST transcoding gateway
+is installed. Existing profile files retain their names; resource IDs distinguish bundled and user profiles with
+`builtin-` and `user-` prefixes. New user IDs use lowercase letters, digits, and hyphens; existing legacy IDs remain readable.
+
+The status stream sends an initial complete snapshot, changes, and a heartbeat at least every five seconds. The frontend
+reconnects this read-only stream after interruption without replaying commands. A shared server deadline bounds unary
+requests, including calls from clients that omit a deadline. Network finalization runs in the conversation loop after a
+restart is accepted, so the UI stays responsive while the old session closes.
+
+For development, install the Python environment and Node.js 22 or newer, then build and test:
 
 ```bash
+uv sync --frozen
 npm ci
 npm test
 ```
 
-`npm run check` checks types without emitting files; `npm run build` regenerates the browser modules.
-After committing, `npm run check:generated` rebuilds the generated directory and verifies that every output is committed.
-The frontend job in the Ruff workflow runs these checks on pull requests and relevant pushes.
+`npm run check` checks TypeScript without emitting files; `npm run build` regenerates the browser bundle.
+After editing the protobuf schema, run `npm run generate` to regenerate both languages using the pinned generators.
+Commit the generated Python, TypeScript, and JavaScript alongside their sources. Running or installing the app does not
+require Node.js, Buf, or protoc. Generation uses pinned remote Buf plugins and requires network access.
+
+After committing, `npm run check:generated` validates the schema, regenerates both languages and the bundle, and verifies
+that every output is committed. The frontend CI job runs these checks and tests the generated TypeScript client against
+the real Python HTTP server, without a robot or an OpenAI API call. Handwritten Python remains under strict mypy;
+the generated Connect interfaces need a narrowly scoped exception for their upstream unparameterized codec annotations.
 
 Run the complete local gate before review:
 

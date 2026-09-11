@@ -1,7 +1,7 @@
 /** Per-personality tool access controls. */
 
-import { describeError, rpcCall } from "../api.ts";
-import type { AvailableTool, ProfileTools } from "../contracts.ts";
+import { api, describeError, listProfiles } from "../api.ts";
+import type { Profile, ToolInfo } from "../gen/reachy/conversation/v1/api_pb.ts";
 import { h, prettifyProfileName, prettifyToolName } from "../ui.ts";
 import { confirmDialog } from "./confirm-dialog.ts";
 
@@ -56,7 +56,11 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
     status
   );
 
-  let currentPayload: ProfileTools | null = null;
+  let currentProfile: Profile | null = null;
+  let profiles: Profile[] = [];
+  let availableTools: ToolInfo[] = [];
+  let activeProfile = "";
+  let locked = true;
   let initialEnabledTools = new Set<string>();
   let dirty = false;
   let busy = false;
@@ -76,14 +80,14 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
   }
 
   function syncActions() {
-    const editable = currentPayload?.editable ?? false;
-    profileSelect.disabled = busy || !currentPayload?.profiles.length;
+    const editable = Boolean(currentProfile) && !locked;
+    profileSelect.disabled = busy || !profiles.length;
     toolGroups.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach((checkbox) => {
       const disabled = busy || !editable;
       checkbox.disabled = disabled;
       checkbox.closest(".settings-tool-choice")?.classList.toggle("is-disabled", disabled);
     });
-    resetButton.disabled = busy || !editable || !currentPayload?.overridden;
+    resetButton.disabled = busy || !editable || !currentProfile?.toolOverride;
     saveButton.disabled = busy || !editable || !dirty;
   }
 
@@ -98,21 +102,21 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
     syncActions();
   }
 
-  function populateProfiles(payload: ProfileTools) {
+  function populateProfiles(payload: Profile) {
     profileSelect.replaceChildren();
-    for (const profile of payload.profiles) {
-      const label = `${prettifyProfileName(profile.id)}${profile.active ? " · Active" : ""}`;
+    for (const profile of profiles) {
+      const label = `${profile.displayName}${profile.name === activeProfile ? " · Active" : ""}`;
       profileSelect.appendChild(
-        h("option", { value: profile.id, selected: profile.id === payload.profile ? "selected" : null }, label)
+        h("option", { value: profile.name, selected: profile.name === payload.name ? "selected" : null }, label)
       );
     }
   }
 
-  function renderSummary(payload: ProfileTools) {
-    const enabledCount = payload.enabled_tools.length;
+  function renderSummary(payload: Profile) {
+    const enabledCount = payload.effectiveToolIds.length;
     const pills = [];
-    if (payload.is_active) pills.push(h("span", { class: "settings-pill is-active" }, "Active"));
-    if (!payload.editable) pills.push(h("span", { class: "settings-pill" }, "Locked"));
+    if (payload.name === activeProfile) pills.push(h("span", { class: "settings-pill is-active" }, "Active"));
+    if (locked) pills.push(h("span", { class: "settings-pill" }, "Locked"));
     summary.replaceChildren(
       h(
         "div",
@@ -121,21 +125,21 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
         h(
           "span",
           { class: "settings-toolset-mode" },
-          payload.overridden ? "Customized for this personality" : "Using profile defaults"
+          Boolean(payload.toolOverride) ? "Customized for this personality" : "Using profile defaults"
         )
       ),
       ...pills
     );
   }
 
-  function renderToolGroups(payload: ProfileTools) {
-    const enabled = new Set(payload.enabled_tools);
+  function renderToolGroups(payload: Profile) {
+    const enabled = new Set(payload.effectiveToolIds);
     const groups = [
-      { title: "Available tools", tools: payload.available_tools, unavailable: false },
+      { title: "Available tools", tools: availableTools, unavailable: false },
       {
         title: "Unavailable selections",
         unavailable: true,
-        tools: payload.unavailable_enabled_tools.map((toolId) => ({
+        tools: payload.effectiveToolIds.filter((id) => !availableTools.some((tool) => tool.id === id)).map((toolId) => ({
           id: toolId,
           description: "Its source is not installed or the tool is no longer exposed.",
         })),
@@ -174,14 +178,14 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
     }
   }
 
-  function render(payload: ProfileTools) {
-    currentPayload = payload;
-    initialEnabledTools = new Set(payload.enabled_tools);
+  function render(payload: Profile) {
+    currentProfile = payload;
+    initialEnabledTools = new Set(payload.effectiveToolIds);
     populateProfiles(payload);
     renderSummary(payload);
     renderToolGroups(payload);
     status.classList.remove("is-error");
-    status.textContent = payload.editable ? "" : "Tool editing is locked by the administrator.";
+    status.textContent = !locked ? "" : "Tool editing is locked by the administrator.";
     setDirty(false);
   }
 
@@ -190,16 +194,26 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
     status.classList.remove("is-error");
     status.textContent = "Loading tools…";
     try {
-      const payload = await rpcCall("profile_tools.get", { profile });
+      const [listed, capabilities, conversation, settings] = await Promise.all([
+        listProfiles(signal),
+        api.getCapabilities({ name: "capabilities" }, { signal }),
+        api.getConversation({ name: "conversation" }, { signal }),
+        api.getSettings({ name: "settings" }, { signal }),
+      ]);
+      profiles = listed;
+      availableTools = capabilities.availableTools;
+      activeProfile = conversation.profile;
+      locked = Boolean(settings.lockedProfile);
+      const payload = await api.getProfile({ name: profile || activeProfile }, { signal });
       if (signal?.aborted) return;
       render(payload);
-      onProfileChanged?.(payload.profile);
+      onProfileChanged?.(payload.name);
     } catch (error) {
       if (signal?.aborted) return;
       status.textContent = `Could not load tool access: ${describeError(error)}`;
       status.classList.add("is-error");
-      if (currentPayload) {
-        profileSelect.value = currentPayload.profile;
+      if (currentProfile) {
+        profileSelect.value = currentProfile.name;
       } else {
         toolGroups.replaceChildren();
       }
@@ -221,26 +235,34 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
   profileSelect.addEventListener("change", async () => {
     const selectedProfile = profileSelect.value;
     if (!(await confirmDiscard())) {
-      profileSelect.value = currentPayload?.profile ?? "";
+      profileSelect.value = currentProfile?.name ?? "";
       return;
     }
     await load(selectedProfile);
   });
 
   saveButton.addEventListener("click", async () => {
-    if (saveButton.disabled || !currentPayload) return;
+    if (saveButton.disabled || !currentProfile) return;
     const enabledTools = selectedToolIds();
     setBusy(true);
     status.classList.remove("is-error");
     status.textContent = "Saving tool access…";
+    let saved = false;
     try {
-      const payload = await rpcCall("profile_tools.save", { profile: currentPayload.profile, enabled_tools: enabledTools });
+      const payload = await api.updateProfile({
+        profile: { name: currentProfile.name, toolOverride: { toolIds: enabledTools } },
+        updateMask: { paths: ["tool_override"] },
+      }, { signal });
+      saved = true;
       if (signal?.aborted) return;
       render(payload);
-      status.textContent = payload.message;
+      if (payload.name === activeProfile) await api.restartConversation({ name: "conversation" }, { signal });
+      if (signal?.aborted) return;
+      status.textContent = payload.name === activeProfile
+        ? "Saved. The conversation is restarting with the updated tools." : "Tool access saved.";
     } catch (error) {
       if (signal?.aborted) return;
-      status.textContent = `Could not save tool access: ${describeError(error)}`;
+      status.textContent = `${saved ? "Tool access saved, but could not restart" : "Could not save tool access"}: ${describeError(error)}`;
       status.classList.add("is-error");
     } finally {
       if (!signal?.aborted) setBusy(false);
@@ -248,10 +270,10 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
   });
 
   resetButton.addEventListener("click", async () => {
-    if (resetButton.disabled || !currentPayload) return;
+    if (resetButton.disabled || !currentProfile) return;
     const confirmed = await confirmDialog({
       title: "Restore profile defaults?",
-      message: `This replaces the custom tool selection for “${prettifyProfileName(currentPayload.profile)}”.`,
+      message: `This replaces the custom tool selection for “${prettifyProfileName(currentProfile.name)}”.`,
       confirmLabel: "Restore defaults",
       signal,
     });
@@ -260,14 +282,22 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
     setBusy(true);
     status.classList.remove("is-error");
     status.textContent = "Restoring defaults…";
+    let saved = false;
     try {
-      const payload = await rpcCall("profile_tools.reset", { profile: currentPayload.profile });
+      const payload = await api.updateProfile({
+        profile: { name: currentProfile.name },
+        updateMask: { paths: ["tool_override"] },
+      }, { signal });
+      saved = true;
       if (signal?.aborted) return;
       render(payload);
-      status.textContent = payload.message;
+      if (payload.name === activeProfile) await api.restartConversation({ name: "conversation" }, { signal });
+      if (signal?.aborted) return;
+      status.textContent = payload.name === activeProfile
+        ? "Saved. The conversation is restarting with the updated tools." : "Tool access saved.";
     } catch (error) {
       if (signal?.aborted) return;
-      status.textContent = `Could not restore defaults: ${describeError(error)}`;
+      status.textContent = `${saved ? "Defaults restored, but could not restart" : "Could not restore defaults"}: ${describeError(error)}`;
       status.classList.add("is-error");
     } finally {
       if (!signal?.aborted) setBusy(false);
@@ -281,12 +311,12 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
       return dirty;
     },
     async refresh() {
-      await load(currentPayload?.profile ?? initialProfile);
+      await load(currentProfile?.name ?? initialProfile);
     },
   };
 }
 
-function toolChoice(tool: AvailableTool, checked: boolean, unavailable: boolean) {
+function toolChoice(tool: Pick<ToolInfo, "id" | "description">, checked: boolean, unavailable: boolean) {
   const input = h("input", {
     type: "checkbox",
     value: tool.id,

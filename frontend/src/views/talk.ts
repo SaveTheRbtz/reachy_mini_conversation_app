@@ -1,6 +1,5 @@
-/** Talk view: microphone control and playback status from the robot. */
-
-import { describeError, rpcCall, subscribe } from "../api.ts";
+import { api, describeError, watchConversation } from "../api.ts";
+import { Conversation_ConnectionState as ConnectionState, type Conversation } from "../gen/reachy/conversation/v1/api_pb.ts";
 import type { RouterContext } from "../router.ts";
 import { ORB_STATES, type OrbState } from "../constants.ts";
 import { createOrb } from "../orb.ts";
@@ -9,49 +8,38 @@ import { setPersonality } from "../personality-badge.ts";
 import { h, prettifyProfileName } from "../ui.ts";
 
 const CAPTION_BY_STATE: Record<OrbState, string> = {
-  [ORB_STATES.MUTED]: "Microphone muted",
-  [ORB_STATES.IDLE]: "Microphone on",
-  [ORB_STATES.CONNECTING]: "Connecting to OpenAI Live...",
-  [ORB_STATES.ERROR]: "Connection error",
+  muted: "Microphone muted",
+  idle: "Microphone on",
+  connecting: "Connecting to OpenAI Live...",
+  error: "Connection error",
 };
 
 export async function mountTalkView({ outlet, signal }: RouterContext) {
-  const pending = consumePendingApply();
-  let microphone: "loading" | "on" | "muted" = "loading";
+  let conversation: Conversation | undefined;
+  let connected = true;
   let togglePending = false;
-  let activePersonality: string | null = null;
-  let connectionState: Exclude<OrbState, "muted"> = ORB_STATES.CONNECTING;
-  let playing = false;
-  let connectionVersion = 0;
-  let playbackVersion = 0;
-  let statusRequest: Promise<void> | null = null;
-  const subscriptions: (() => void)[] = [];
-
-  const caption = h(
-    "p",
-    { class: "talk__caption", role: "status", "aria-live": "polite" },
-    CAPTION_BY_STATE[ORB_STATES.CONNECTING]
-  );
+  let startupProfile = "";
+  let locked = true;
+  const caption = h("p", { class: "talk__caption", role: "status", "aria-live": "polite" },
+    CAPTION_BY_STATE.connecting);
+  const orb = createOrb({ initialState: ORB_STATES.CONNECTING });
+  orb.root.disabled = true;
+  orb.root.addEventListener("click", onMicTap);
   const defaultAction = document.querySelector<HTMLButtonElement>('[data-component="default-personality-action"]');
   if (defaultAction) {
     defaultAction.hidden = true;
     defaultAction.addEventListener("click", onSetDefault);
   }
-  const orb = createOrb({ initialState: ORB_STATES.CONNECTING });
-  orb.root.disabled = true;
-  orb.root.addEventListener("click", onMicTap);
-  syncMicAria();
+  signal.addEventListener("abort", () => {
+    if (defaultAction) {
+      defaultAction.hidden = true;
+      defaultAction.removeEventListener("click", onSetDefault);
+    }
+  }, { once: true });
+  outlet.replaceChildren(h("section", { class: "view view--talk" },
+    h("div", { class: "talk__orb-wrap" }, orb.root), caption));
 
-  signal.addEventListener("abort", cleanup, { once: true });
-
-  const view = h(
-    "section",
-    { class: "view view--talk" },
-    h("div", { class: "talk__orb-wrap" }, orb.root),
-    caption
-  );
-  outlet.replaceChildren(view);
-
+  const pending = consumePendingApply();
   if (pending) {
     caption.textContent = `Applying "${prettifyProfileName(pending.name)}"…`;
     try {
@@ -62,151 +50,79 @@ export async function mountTalkView({ outlet, signal }: RouterContext) {
       caption.textContent = `Failed to apply personality: ${describeError(error)}`;
       return;
     }
+  }
+  if (signal.aborted) return;
+  void watchConversation(signal, (snapshot) => {
+    conversation = snapshot;
+    connected = true;
+    setPersonality(snapshot.profile);
+    render();
+  }, () => {
+    connected = false;
+    render();
+  });
+  try {
+    const settings = await api.getSettings({ name: "settings" }, { signal });
     if (signal.aborted) return;
-    caption.textContent = CAPTION_BY_STATE[ORB_STATES.CONNECTING];
-  }
-  void refreshPersonalityState();
-
-  subscriptions.push(
-    subscribe("conversation.activity", ({ reason }) => {
-      switch (reason) {
-        case "connected":
-          connectionVersion++;
-          connectionState = ORB_STATES.IDLE;
-          break;
-        case "disconnected":
-          connectionVersion++;
-          playbackVersion++;
-          connectionState = ORB_STATES.ERROR;
-          playing = false;
-          break;
-        case "playback_started":
-        case "playback_stopped":
-          playbackVersion++;
-          playing = reason === "playback_started";
-          break;
-        default:
-          return;
-      }
-      renderStatus();
-    }),
-    subscribe("rpc.connection", ({ connected }) => {
-      if (connected) {
-        void refreshStatus();
-      } else {
-        connectionVersion++;
-        playbackVersion++;
-        connectionState = ORB_STATES.ERROR;
-        playing = false;
-        renderStatus();
-      }
-    })
-  );
-  await refreshStatus();
-
-  function cleanup() {
-    for (const unsubscribe of subscriptions) unsubscribe();
-    if (defaultAction) {
-      defaultAction.hidden = true;
-      defaultAction.removeEventListener("click", onSetDefault);
-    }
+    startupProfile = settings.startupProfile;
+    locked = Boolean(settings.lockedProfile);
+    render();
+  } catch (error) {
+    if (!signal.aborted) console.warn("Failed to load startup personality", error);
   }
 
-  function refreshStatus() {
-    if (statusRequest) return statusRequest;
-    orb.root.disabled = true;
-    const requestedConnectionVersion = connectionVersion;
-    const requestedPlaybackVersion = playbackVersion;
-    statusRequest = rpcCall("conversation.status").then((status) => {
-      if (signal.aborted) return;
-      if (connectionVersion === requestedConnectionVersion) {
-        connectionState = status.connected ? ORB_STATES.IDLE :
-          status.connection_state === "disconnected" ? ORB_STATES.ERROR : ORB_STATES.CONNECTING;
-      }
-      if (playbackVersion === requestedPlaybackVersion) playing = status.playing;
-      if (!togglePending) microphone = status.muted ? "muted" : "on";
-      renderStatus();
-    }).catch((error: unknown) => {
-      console.warn("Failed to load conversation status", error);
-      if (signal.aborted || connectionVersion !== requestedConnectionVersion) return;
-      connectionState = ORB_STATES.ERROR;
-      if (playbackVersion === requestedPlaybackVersion) playing = false;
-      renderStatus();
-    }).finally(() => {
-      statusRequest = null;
-      orb.root.disabled = microphone === "loading" || togglePending;
-    });
-    return statusRequest;
-  }
-
-  function renderStatus() {
-    const state = connectionState === ORB_STATES.IDLE
-      ? (microphone === "muted" ? ORB_STATES.MUTED : ORB_STATES.IDLE) : connectionState;
-    const showingPlayback = connectionState === ORB_STATES.IDLE && playing;
-    orb.setState(state, showingPlayback);
-    caption.textContent = `${showingPlayback ? "Speaking · " : ""}${CAPTION_BY_STATE[state]}`;
-    orb.root.disabled = microphone === "loading" || togglePending || statusRequest !== null;
-    syncMicAria();
+  function render() {
+    const state: OrbState = !connected || conversation?.connectionState === ConnectionState.DISCONNECTED
+      ? ORB_STATES.ERROR : conversation?.connectionState !== ConnectionState.CONNECTED
+        ? ORB_STATES.CONNECTING : conversation.muted ? ORB_STATES.MUTED : ORB_STATES.IDLE;
+    const playing = connected && conversation?.connectionState === ConnectionState.CONNECTED && conversation.playing;
+    orb.setState(state, playing);
+    caption.textContent = `${playing ? "Speaking · " : ""}${CAPTION_BY_STATE[state]}`;
+    orb.root.disabled = !conversation || togglePending;
+    orb.root.setAttribute("aria-pressed", String(Boolean(conversation && !conversation.muted)));
+    orb.root.setAttribute("aria-label", !conversation ? "Loading microphone state" :
+      conversation.muted ? "Unmute microphone" : "Mute microphone");
+    if (defaultAction) defaultAction.hidden = locked || !conversation || conversation.profile === startupProfile;
   }
 
   async function onMicTap() {
-    if (microphone === "loading" || togglePending || statusRequest) return;
+    if (!conversation || togglePending) return;
     togglePending = true;
+    render();
     try {
-      const result = await rpcCall("conversation.mic", { muted: microphone === "on" });
-      microphone = result.muted ? "muted" : "on";
-    } catch (error) {
-      if (!signal.aborted) {
-        caption.textContent = `Failed to toggle the microphone: ${describeError(error)}`;
+      const updated = await api.updateConversation({
+        conversation: { name: "conversation", muted: !conversation.muted },
+        updateMask: { paths: ["muted"] },
+      }, { signal });
+      if (!signal.aborted && conversation) {
+        conversation.muted = updated.muted;
+        render();
       }
-      return;
+    } catch (error) {
+      if (!signal.aborted) caption.textContent = `Failed to toggle the microphone: ${describeError(error)}`;
     } finally {
       togglePending = false;
-      orb.root.disabled = statusRequest !== null;
-    }
-    if (signal.aborted) return;
-    renderStatus();
-  }
-
-  async function refreshPersonalityState() {
-    try {
-      const personality = await rpcCall("personalities.list");
-      if (signal.aborted) return;
-      activePersonality = personality.current;
-      setPersonality(personality.current);
-      if (defaultAction) {
-        defaultAction.hidden = personality.locked || personality.current === personality.startup;
-      }
-    } catch (error) {
-      console.warn("Failed to load the active personality", error);
+      if (!signal.aborted) orb.root.disabled = !conversation;
     }
   }
 
   async function onSetDefault() {
-    if (!defaultAction || !activePersonality) return;
+    if (!defaultAction || !conversation) return;
     defaultAction.disabled = true;
-    caption.textContent = `Saving "${prettifyProfileName(activePersonality)}" as default...`;
+    const profile = conversation.profile;
     try {
-      await rpcCall("personalities.apply", { name: activePersonality, persist: true });
+      const settings = await api.updateSettings({
+        settings: { name: "settings", startupProfile: profile },
+        updateMask: { paths: ["startup_profile"] },
+      }, { signal });
       if (signal.aborted) return;
-      defaultAction.hidden = true;
-      caption.textContent = `"${prettifyProfileName(activePersonality)}" will be used at startup.`;
+      startupProfile = settings.startupProfile;
+      render();
+      caption.textContent = `"${prettifyProfileName(profile)}" will be used at startup.`;
     } catch (error) {
-      if (!signal.aborted) {
-        caption.textContent = `Failed to save default: ${describeError(error)}`;
-      }
+      if (!signal.aborted) caption.textContent = `Failed to save default: ${describeError(error)}`;
     } finally {
       defaultAction.disabled = false;
     }
-  }
-
-  function syncMicAria() {
-    if (microphone === "loading") {
-      orb.root.setAttribute("aria-pressed", "false");
-      orb.root.setAttribute("aria-label", "Loading microphone state");
-      return;
-    }
-    orb.root.setAttribute("aria-pressed", String(microphone === "on"));
-    orb.root.setAttribute("aria-label", microphone === "muted" ? "Unmute microphone" : "Mute microphone");
   }
 }
