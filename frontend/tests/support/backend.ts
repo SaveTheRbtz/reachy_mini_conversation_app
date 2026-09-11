@@ -12,7 +12,7 @@ export interface TestBackend {
 }
 
 export async function startBackend(args: string[] = []): Promise<TestBackend> {
-  const root = fileURLToPath(new URL("../../", import.meta.url));
+  const root = fileURLToPath(new URL("../../../", import.meta.url));
   const python =
     process.env.PYTHON ??
     resolve(root, process.platform === "win32" ? ".venv/Scripts/python.exe" : ".venv/bin/python");

@@ -1,7 +1,7 @@
 import { test as base, expect, type Page } from "@playwright/test";
-import { startBackend, type TestBackend } from "../tests/backend.ts";
+import { startBackend, type TestBackend } from "../tests/support/backend.ts";
 
-export const test = base.extend<{ backend: TestBackend; backendArgs: string[] }>({
+export const test = base.extend<{ backend: TestBackend; backendArgs: string[]; pageErrors: void }>({
   backendArgs: [[], { option: true }],
   backend: async ({ backendArgs }, use) => {
     const server = await startBackend(backendArgs);
@@ -14,6 +14,15 @@ export const test = base.extend<{ backend: TestBackend; backendArgs: string[] }>
   baseURL: async ({ backend }, use) => {
     await use(backend.origin);
   },
+  pageErrors: [
+    async ({ page }, use) => {
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await use();
+      expect(errors).toEqual([]);
+    },
+    { auto: true },
+  ],
 });
 
 export async function expectVisibleImages(page: Page): Promise<void> {

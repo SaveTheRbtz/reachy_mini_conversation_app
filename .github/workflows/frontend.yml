@@ -5,12 +5,13 @@ on:
     paths:
       - "frontend/**"
       - "src/**"
-      - "tests/fixtures/**"
+      - "tests/**"
       - "proto/**"
       - "buf.*"
       - "package*.json"
       - "tsconfig*.json"
       - "vite.config.ts"
+      - "vitest.config.ts"
       - "playwright.config.ts"
       - ".prettier*"
       - ".gitattributes"
@@ -55,6 +56,9 @@ jobs:
       - name: Check formatting, strict types, and protobuf schemas
         run: npm run check
 
+      - name: Test frontend behavior
+        run: npm run test:unit
+
       - name: Upload installable distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -92,7 +96,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Test the generated Connect client against Python
-        run: npm run test:api
+        run: npm run test:integration
 
       - name: Install browser
         run: npx playwright install --with-deps --only-shell chromium

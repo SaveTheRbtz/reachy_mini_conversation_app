@@ -5,6 +5,7 @@ export default defineConfig({
   timeout: 60000,
   expect: { timeout: 10000 },
   workers: 1,
+  forbidOnly: Boolean(process.env.CI),
   retries: 0,
   reporter: process.env.CI ? "github" : "list",
   use: {

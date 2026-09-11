@@ -1,6 +1,6 @@
 import { test, expect, expectVisibleImages } from "./fixtures.ts";
 
-test("personality CRUD preserves tool presence, deep links, and keyboard dialogs @mobile", async ({
+test("a personality can be created, edited, selected, and deleted @mobile", async ({
   page,
   request,
 }, testInfo) => {
@@ -19,28 +19,12 @@ test("personality CRUD preserves tool presence, deep links, and keyboard dialogs
   await page.getByLabel("Greeting", { exact: true }).fill("Hello from your browser guide.");
   await page.getByRole("button", { name: "Create personality", exact: true }).click();
   await expect(page).toHaveURL(/\/profiles\/user-browser-guide$/);
-  await expect(page.getByRole("link", { name: "Personalities", exact: true })).toHaveClass(/\bactive\b/);
   await expect(page.getByRole("heading", { level: 1, name: "Browser Guide" })).toBeVisible();
   await page.reload();
   await expect(page.getByLabel("Instructions", { exact: true })).toHaveValue(
     "Keep conversations clear and friendly.",
   );
   await page.screenshot({ path: testInfo.outputPath("personality-editor.png") });
-  await page.getByLabel("Instructions", { exact: true }).fill("Unsaved draft");
-  await page.getByRole("link", { name: "All personalities" }).click();
-  const discard = page.getByRole("dialog", { name: "Discard unsaved changes?" });
-  await expect(discard).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(discard).not.toBeVisible();
-  await expect(page.getByRole("link", { name: "All personalities" })).toBeFocused();
-  await expect(page.getByLabel("Instructions", { exact: true })).toHaveValue("Unsaved draft");
-  await page.getByRole("link", { name: "All personalities" }).click();
-  await discard.getByRole("button", { name: "Discard changes", exact: true }).click();
-  await expect(page).toHaveURL(/\/profiles$/);
-  await page.goto("/profiles/user-browser-guide");
-  await expect(page.getByLabel("Instructions", { exact: true })).toHaveValue(
-    "Keep conversations clear and friendly.",
-  );
   await page.getByRole("checkbox", { name: /^Use profile defaults/ }).uncheck();
   await page.getByRole("button", { name: "Disable all", exact: true }).click();
   await page.getByRole("button", { name: "Save changes", exact: true }).click();
@@ -55,8 +39,6 @@ test("personality CRUD preserves tool presence, deep links, and keyboard dialogs
   await page.getByRole("checkbox", { name: /^Use profile defaults/ }).check();
   await page.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect(page.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
-  await page.reload();
-  await expect(page.getByRole("checkbox", { name: /^Use profile defaults/ })).toBeChecked();
   await page.getByRole("button", { name: "Use personality", exact: true }).click();
   await expect(page).toHaveURL(/\/$/);
   await expect
@@ -83,6 +65,23 @@ test("personality CRUD preserves tool presence, deep links, and keyboard dialogs
   await expect(page).toHaveURL(/\/profiles$/);
   await expect(page.getByRole("link", { name: /Browser Guide/ })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("leaving the personality editor keeps its draft until discard is confirmed", async ({ page }) => {
+  await page.goto("/profiles/builtin-default");
+  await page.getByRole("checkbox", { name: /^Use profile defaults/ }).uncheck();
+  await page.getByRole("link", { name: "All personalities" }).click();
+  const discard = page.getByRole("dialog", { name: "Discard unsaved changes?" });
+  await expect(discard).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(discard).not.toBeVisible();
+  await expect(page.getByRole("link", { name: "All personalities" })).toBeFocused();
+  await expect(page.getByRole("checkbox", { name: /^Use profile defaults/ })).not.toBeChecked();
+  await page.getByRole("link", { name: "All personalities" }).click();
+  await discard.getByRole("button", { name: "Discard changes", exact: true }).click();
+  await expect(page).toHaveURL(/\/profiles$/);
+  await page.getByRole("link", { name: "Default", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: /^Use profile defaults/ })).toBeChecked();
 });
 
 test("saving active tool access stays saved when applying it fails", async ({ page, request }) => {

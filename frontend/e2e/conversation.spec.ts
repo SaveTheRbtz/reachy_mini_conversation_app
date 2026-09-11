@@ -4,8 +4,6 @@ test("conversation controls work with keyboard, playback, and navigation @mobile
   page,
   request,
 }, testInfo) => {
-  const errors: string[] = [];
-  page.on("pageerror", (error) => errors.push(error.message));
   await page.goto("/");
   await expect(page.getByText("Microphone on", { exact: true })).toBeVisible();
   const documentStartedAt = await page.evaluate(() => performance.timeOrigin);
@@ -46,7 +44,6 @@ test("conversation controls work with keyboard, playback, and navigation @mobile
     .toMatchObject({ active_watches: 1 });
   await expect(page.getByRole("button", { name: "Unmute microphone", exact: true })).toBeEnabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  expect(errors).toEqual([]);
 });
 
 test("a stalled send times out without blocking microphone controls or replaying text", async ({
