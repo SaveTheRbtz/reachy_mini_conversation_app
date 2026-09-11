@@ -15,6 +15,7 @@ from openai import AsyncOpenAI
 from pydantic import ValidationError
 from numpy.typing import NDArray
 from agents.tool_context import ToolContext
+from websockets.exceptions import ConnectionClosed
 from openai.types.responses import (
     ResponseCreatedEvent,
     ResponseCompletedEvent,
@@ -39,8 +40,9 @@ logger = logging.getLogger(__name__)
 
 OPENAI_SAMPLE_RATE: Final = 24_000
 AUDIO_WARNING_INTERVAL_SECONDS = 60.0
-AUDIO_SEND_STALL_SECONDS = 1.0
+MICROPHONE_SEND_TIMEOUT_SECONDS = 5.0
 SESSION_TIMEOUT_SECONDS = 15.0
+TOOL_TIMEOUT_SECONDS = 30.0
 AudioSamples: TypeAlias = NDArray[np.float32] | NDArray[np.int16]
 InputAudioFrame: TypeAlias = tuple[int, AudioSamples]
 ActivityObserver: TypeAlias = Callable[[str], None]
@@ -117,6 +119,7 @@ class LiveConversation:
         self.dependencies = dependencies
         self.voice = voice
         self.output_queue: asyncio.Queue[PlaybackAudio] = asyncio.Queue()
+        self._microphone_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=1)
         self.last_activity_time = time.monotonic()
         self.usage_seconds = 0.0
         self._connection: AsyncLiveConnection | None = None
@@ -134,8 +137,7 @@ class LiveConversation:
         self._tool_batches: asyncio.Queue[BackendResponse] = asyncio.Queue()
         self._handled_call_ids: set[str] = set()
         self._backend_commands: set[str] = set()
-        self._microphone_forwarding_started = False
-        self._last_audio_send_warning_at = float("-inf")
+        self._last_audio_drop_warning_at = float("-inf")
 
     @property
     def connected(self) -> bool:
@@ -207,8 +209,8 @@ class LiveConversation:
                 try:
                     if self._closing:
                         return
-                    await connection.session.start(session=session)
                     async with asyncio.timeout(SESSION_TIMEOUT_SECONDS):
+                        await connection.session.start(session=session)
                         while self._connection is None:
                             event = await connection.recv()
                             if event.type == "session.started":
@@ -223,13 +225,14 @@ class LiveConversation:
                             elif event.type == "session.closed":
                                 await self._handle_event(event)
                                 raise RuntimeError("Live session closed before startup")
-                    await connection.session.instructions.append(
-                        event_id="greeting",
-                        delegation_id=None,
-                        content=get_session_greeting_prompt(),
-                    )
+                        await connection.session.instructions.append(
+                            event_id="greeting",
+                            delegation_id=None,
+                            content=get_session_greeting_prompt(),
+                        )
                     async with asyncio.TaskGroup() as tasks:
                         tool_worker = tasks.create_task(self._run_tools())
+                        microphone_sender = tasks.create_task(self._send_microphone(connection))
                         try:
                             async for event in connection:
                                 await self._handle_event(event)
@@ -239,6 +242,7 @@ class LiveConversation:
                                 raise RuntimeError("Live connection closed without final session usage")
                         finally:
                             tool_worker.cancel()
+                            microphone_sender.cancel()
                 finally:
                     if self._connection is not None and not self._closed.is_set():
                         logger.warning(
@@ -255,28 +259,35 @@ class LiveConversation:
                     self._connection = None
                     self._transport = None
                     self._mark_activity("disconnected")
+                    await self._close_transport(connection)
 
     async def shutdown(self) -> None:
         """Request finalization and keep receiving until final usage arrives."""
         connection = self._connection
-        if connection is None:
-            self._closing = True
-            if self._transport is not None:
-                await self._transport.close()
-            return
-        if self._closed.is_set():
-            return
-        if not self._closing:
-            self._closing = True
-            await connection.session.close()
+        already_closing = self._closing
+        self._closing = True
+        if connection is not None and not self._closed.is_set():
+            try:
+                async with asyncio.timeout(SESSION_TIMEOUT_SECONDS):
+                    if not already_closing:
+                        await connection.session.close()
+                    await self._closed.wait()
+            except (TimeoutError, OSError, ConnectionClosed) as error:
+                logger.warning("Live finalization failed; final usage is unconfirmed: %s", type(error).__name__)
+        if self._transport is not None:
+            await self._close_transport(self._transport)
+
+    async def _close_transport(self, connection: AsyncLiveConnection) -> None:
         try:
-            await asyncio.wait_for(self._closed.wait(), timeout=SESSION_TIMEOUT_SECONDS)
+            async with asyncio.timeout(SESSION_TIMEOUT_SECONDS):
+                await connection.close()
         except TimeoutError:
-            logger.warning("Live finalization timed out; final usage is unconfirmed")
+            logger.warning("Live transport close stalled; forcing the closing handshake to finish")
+            # A second close enforces the SDK's expired close deadline without waiting for the send buffer.
             await connection.close()
 
     async def receive(self, frame: InputAudioFrame) -> None:
-        """Forward continuous microphone audio, including silence, to Live."""
+        """Queue microphone audio without blocking robot capture on network writes."""
         connection = self._connection
         if connection is None or self._closing:
             return
@@ -284,22 +295,23 @@ class LiveConversation:
         pcm16 = self._bridge.microphone_to_pcm16(sample_rate, samples)
         if not pcm16:
             return
-        started_at = time.monotonic()
-        await connection.session.input_audio.append(audio=base64.b64encode(pcm16).decode("ascii"))
-        finished_at = time.monotonic()
-        if not self._microphone_forwarding_started:
-            logger.info("Live microphone forwarding started: input_rate=%d Hz pcm16_bytes=%d", sample_rate, len(pcm16))
-            self._microphone_forwarding_started = True
-        if (
-            finished_at - started_at >= AUDIO_SEND_STALL_SECONDS
-            and finished_at - self._last_audio_send_warning_at >= AUDIO_WARNING_INTERVAL_SECONDS
-        ):
-            logger.warning(
-                "Live microphone forwarding delayed: send_duration=%.3fs pcm16_bytes=%d",
-                finished_at - started_at,
-                len(pcm16),
-            )
-            self._last_audio_send_warning_at = finished_at
+        if self._microphone_queue.full():
+            self._microphone_queue.get_nowait()
+            now = time.monotonic()
+            if now - self._last_audio_drop_warning_at >= AUDIO_WARNING_INTERVAL_SECONDS:
+                logger.warning("Live microphone send fell behind; discarding queued audio")
+                self._last_audio_drop_warning_at = now
+        self._microphone_queue.put_nowait(pcm16)
+
+    async def _send_microphone(self, connection: AsyncLiveConnection) -> None:
+        while True:
+            pcm16 = await self._microphone_queue.get()
+            try:
+                async with asyncio.timeout(MICROPHONE_SEND_TIMEOUT_SECONDS):
+                    await connection.session.input_audio.append(audio=base64.b64encode(pcm16).decode("ascii"))
+            except (TimeoutError, OSError, ConnectionClosed) as error:
+                logger.warning("Live microphone send failed: %s", type(error).__name__)
+                raise
 
     async def emit(self) -> PlaybackAudio:
         """Wait for the next chunk of assistant audio."""
@@ -410,9 +422,19 @@ class LiveConversation:
                     if batch is not None and not self._closing:
                         self._tool_batches.put_nowait(batch)
                 elif nested_type in {"response.failed", "response.incomplete", "response.cancelled", "error"}:
-                    self._responses.pop(event.delegation_id, None)
-                    self._backend_busy = False
                     logger.error("Live backend failed: event=%s delegation_id=%s", nested_type, event.delegation_id)
+                    batch = self._responses.get(event.delegation_id)
+                    if batch is None:
+                        if nested_type == "error":
+                            raise RuntimeError("Live backend error without an active response")
+                        return
+                    failed_response = event.event.get("response")
+                    if isinstance(failed_response, dict) and failed_response.get("id") != batch.response_id:
+                        return
+                    self._responses.pop(event.delegation_id)
+                    batch.calls.clear()
+                    if not self._closing:
+                        self._tool_batches.put_nowait(batch)
             except ValidationError as error:
                 logger.error(
                     "Invalid Live backend event: type=%s errors=%s",
@@ -471,7 +493,8 @@ class LiveConversation:
                             tool_arguments=call.arguments,
                         )
                         try:
-                            output = await tool.on_invoke_tool(context, call.arguments)
+                            async with asyncio.timeout(TOOL_TIMEOUT_SECONDS):
+                                output = await tool.on_invoke_tool(context, call.arguments)
                         except Exception as error:
                             logger.exception("Tool failed: %s", call.name)
                             output = {"error": f"{call.name} failed: {type(error).__name__}: {error}"}
@@ -490,9 +513,12 @@ class LiveConversation:
                             "output": output if isinstance(output, str) else json.dumps(output),
                         },
                     )
-                if not batch.calls and not self._pending_input:
-                    self._backend_busy = False
-                    continue
+                if not batch.calls:
+                    if self._responses or not self._tool_batches.empty():
+                        continue
+                    if not self._pending_input:
+                        self._backend_busy = False
+                        continue
                 self._pending_input = False
                 event_id = str(uuid4())
                 self._backend_commands.add(event_id)

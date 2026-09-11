@@ -37,6 +37,8 @@ The voice model delegates reasoning to Astra through Responses. The app executes
 
 Audio uses persistent soxr resamplers between the robot and Live's 24 kHz PCM stream. Microphone capture and speaker playback run independently of backend work. Playback timing reflects software queues, not proof that sound was physically heard.
 
+A failed microphone send, or one stalled for five seconds, restarts the Live session while local media keeps running. Only the newest pending microphone frame is retained during backpressure. Tool execution has a 30-second deadline; failures return an error without automatically retrying the tool. Typed input queued behind a failed backend response continues in the same session. Startup and graceful finalization are bounded, with transport cleanup if the server stops responding.
+
 <p align="center">
   <img src="docs/assets/conversation_app_arch.svg" alt="Architecture Diagram" width="600"/>
 </p>
