@@ -9,6 +9,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,4 +43,4 @@ jobs:
         run: uv sync --frozen --group dev
 
       - name: Run mypy
-        run: uv run mypy
+        run: uv run --no-sync mypy

@@ -213,12 +213,20 @@ Commit the generated Python, TypeScript, and static assets alongside their sourc
 require Node.js, Buf, or protoc. Generation uses pinned remote Buf plugins and requires network access.
 
 After committing, `npm run check:generated` validates the schema, regenerates both languages and the bundle, and verifies
-that every output is committed. The frontend CI job also runs Playwright desktop/mobile tests and generated-client tests
-against the production Python API, storage, and conversation/audio loops. Each test gets an isolated temporary instance;
+that every output is committed. The Frontend workflow checks formatting, strict types, schemas, code generation, and
+the Vite build independently of the API/browser tests, which exercise the committed assets. `npm run test:api` runs the
+generated-client tests; `npm run test:e2e` runs Playwright desktop/mobile tests. Both run against the production Python API,
+storage, and conversation/audio loops. Each test gets an isolated temporary instance;
 only robot hardware and OpenAI I/O are simulated. Tests cover saved state, tool inheritance, reconnects, stalled calls,
 unsaved drafts, and command counts to detect unintended retries. Failed browser tests retain screenshots, traces, and video
-under `test-results/`. Handwritten Python remains under strict mypy;
-the generated Connect interfaces need a narrowly scoped exception for their upstream unparameterized codec annotations.
+under `test-results/` and are uploaded to GitHub as `browser-failures` for seven days. Handwritten Python remains under
+strict mypy; the generated Connect interfaces need a narrowly scoped exception for their upstream unparameterized codec
+annotations.
+
+Every pull request runs Frontend, Ruff, Type check, Pytest, and `uv.lock` checks. Pytest runs on Linux, macOS, and
+Windows and builds a wheel from a source distribution, verifying the packaged SPA files and Windows path limits.
+The test suite uses simulated external services and does not download the emotions dataset. All five workflows
+also support manual runs against a selected branch.
 
 Run the complete local gate before review:
 
