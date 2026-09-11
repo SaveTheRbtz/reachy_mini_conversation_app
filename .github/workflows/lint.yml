@@ -10,6 +10,9 @@ on:
       - "package.json"
       - "package-lock.json"
       - "tsconfig*.json"
+      - "vite.config.ts"
+      - "playwright.config.ts"
+      - ".prettier*"
       - ".github/workflows/lint.yml"
       - "pyproject.toml"
       - "uv.lock"
@@ -27,11 +30,12 @@ jobs:
   frontend:
     name: frontend
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
+          lfs: true
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
@@ -55,6 +59,12 @@ jobs:
 
       - name: Check protobuf schemas and generated code
         run: npm run check:generated
+
+      - name: Install browser
+        run: npx playwright install --with-deps --only-shell chromium
+
+      - name: Test the SPA against the production backend
+        run: npm run test:e2e
 
   ruff:
     name: ruff

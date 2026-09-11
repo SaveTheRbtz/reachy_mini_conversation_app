@@ -173,11 +173,14 @@ Python tools are intentionally not dynamically loaded. Add a new tool as an Agen
 
 ## Development
 
-The browser UI is written in strict TypeScript under `frontend/src/`. Its API contract is
+The browser UI is a Vue SPA under `frontend/src/`, with separate templates, strict TypeScript, and styles in single-file
+components. Vue Router handles Conversation, Personalities, and Settings, including direct links. Vue Query manages
+shared server reads; forms own their drafts and protect unsaved edits. Its API contract is
 [`proto/reachy/conversation/v1/api.proto`](proto/reachy/conversation/v1/api.proto).
 Buf generates Python models/service interfaces and TypeScript models/service descriptors. Connect serves unary calls
 and a conversation snapshot stream through the existing FastAPI app at `/rpc/reachy.conversation.v1.ConversationService/`.
-The frontend uses the generated client and bundles with esbuild; there is no handwritten JSON-RPC transport.
+The frontend uses the generated Connect client. Vite builds the complete packaged UI into `src/reachy_mini_conversation_app/static/`.
+Edit components and `frontend/public/` assets, then rebuild; do not edit generated static files.
 
 The API follows Google AIP resource conventions for `conversation`, `settings`, `capabilities`, and `profiles/{profile}`.
 Updates use field masks; profile and settings writes save configuration, while `RestartConversation` explicitly applies it.
@@ -191,22 +194,30 @@ reconnects this read-only stream after interruption without replaying commands. 
 requests, including calls from clients that omit a deadline. Network finalization runs in the conversation loop after a
 restart is accepted, so the UI stays responsive while the old session closes.
 
-For development, install the Python environment and Node.js 22 or newer, then build and test:
+For development, install the Python environment and Node.js 22.12 or newer, then build and test:
 
 ```bash
 uv sync --frozen
 npm ci
 npm test
+npx playwright install chromium
+npm run test:e2e
 ```
 
-`npm run check` checks TypeScript without emitting files; `npm run build` regenerates the browser bundle.
+`npm run dev` serves the SPA with hot reload and proxies `/rpc` to the app on port 7860.
+`npm run format` formats the frontend. `npm run check` checks formatting, templates, and TypeScript without emitting
+files; `npm run build` regenerates the packaged UI.
+Vue's type checker uses the maintained TypeScript 6 compiler API through the official `@typescript/typescript6` package.
 After editing the protobuf schema, run `npm run generate` to regenerate both languages using the pinned generators.
-Commit the generated Python, TypeScript, and JavaScript alongside their sources. Running or installing the app does not
+Commit the generated Python, TypeScript, and static assets alongside their sources. Running or installing the app does not
 require Node.js, Buf, or protoc. Generation uses pinned remote Buf plugins and requires network access.
 
 After committing, `npm run check:generated` validates the schema, regenerates both languages and the bundle, and verifies
-that every output is committed. The frontend CI job runs these checks and tests the generated TypeScript client against
-the real Python HTTP server, without a robot or an OpenAI API call. Handwritten Python remains under strict mypy;
+that every output is committed. The frontend CI job also runs Playwright desktop/mobile tests and generated-client tests
+against the production Python API, storage, and conversation/audio loops. Each test gets an isolated temporary instance;
+only robot hardware and OpenAI I/O are simulated. Tests cover saved state, tool inheritance, reconnects, stalled calls,
+unsaved drafts, and command counts to detect unintended retries. Failed browser tests retain screenshots, traces, and video
+under `test-results/`. Handwritten Python remains under strict mypy;
 the generated Connect interfaces need a narrowly scoped exception for their upstream unparameterized codec annotations.
 
 Run the complete local gate before review:
