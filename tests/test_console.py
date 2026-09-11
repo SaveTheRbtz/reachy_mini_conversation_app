@@ -13,6 +13,8 @@ import pytest
 from fastapi import FastAPI
 from openai.types.live.output_audio_delta_event import OutputAudioDeltaEvent
 
+from tests.support.console import make_robot, make_conversation
+from tests.support.realtime import running_task
 import reachy_mini_conversation_app.console as console_module
 import reachy_mini_conversation_app.realtime as realtime_module
 from reachy_mini_conversation_app.memory import MemorySnapshot
@@ -20,39 +22,6 @@ from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.realtime import PlaybackAudio, LiveConversation
 from reachy_mini_conversation_app.startup_settings import write_startup_settings
 from reachy_mini_conversation_app.gen.reachy.conversation.v1.api_pb import Conversation
-
-
-def _conversation() -> SimpleNamespace:
-    return SimpleNamespace(
-        voice="gleam",
-        history=[],
-        connected=True,
-        shutdown=AsyncMock(),
-        receive=AsyncMock(),
-        emit=AsyncMock(),
-        interrupt=AsyncMock(),
-        clear_playback=MagicMock(),
-        acknowledge_after_playback=AsyncMock(),
-        acknowledge_playback_end=MagicMock(),
-        set_clear_player=MagicMock(),
-        set_activity_observer=MagicMock(),
-        output_queue=asyncio.Queue(),
-    )
-
-
-def _robot() -> SimpleNamespace:
-    return SimpleNamespace(
-        media=SimpleNamespace(
-            get_input_audio_samplerate=MagicMock(return_value=16_000),
-            get_audio_sample=MagicMock(),
-            push_audio_sample=MagicMock(),
-            audio=SimpleNamespace(clear_player=MagicMock()),
-            stop_recording=MagicMock(),
-            start_recording=MagicMock(),
-            start_playing=MagicMock(),
-            stop_playing=MagicMock(),
-        )
-    )
 
 
 @pytest.mark.asyncio
@@ -65,7 +34,10 @@ async def test_spa_routes_keep_static_files_and_rpc_separate(tmp_path: Path) -> 
         return {"page": "SDK fallback"}
 
     stream = LocalStream(
-        _robot(), conversation_factory=lambda voice: _conversation(), settings_app=application, instance_path=tmp_path
+        make_robot(),
+        conversation_factory=lambda voice: make_conversation(),
+        settings_app=application,
+        instance_path=tmp_path,
     )
     stream.init_settings_ui()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://test") as client:
@@ -98,14 +70,14 @@ def test_inactivity_survives_reconnect_and_ignores_playback_notifications(monkey
     """Only dialogue refreshes the sleep deadline, including after a session replacement."""
     now = 100.0
     monkeypatch.setattr(console_module.time, "monotonic", lambda: now)
-    stream = LocalStream(_robot(), conversation_factory=lambda voice: _conversation())
+    stream = LocalStream(make_robot(), conversation_factory=lambda voice: make_conversation())
     activity = stream.conversation.set_activity_observer.call_args.args[0]
     now = 200.0
     activity("interaction")
     now = 300.0
     for reason in ("playback_started", "playback_stopped", "disconnected"):
         activity(reason)
-    stream._install_conversation(_conversation())
+    stream._install_conversation(make_conversation())
     activity = stream.conversation.set_activity_observer.call_args.args[0]
     activity("connected")
     assert stream.seconds_since_activity() == 100.0
@@ -114,11 +86,12 @@ def test_inactivity_survives_reconnect_and_ignores_playback_notifications(monkey
     assert stream.seconds_since_activity() == 0.0
 
 
-def test_status_reports_microphone_and_playback_independently() -> None:
+@pytest.mark.asyncio
+async def test_status_reports_microphone_and_playback_independently() -> None:
     """A muted microphone does not imply that the robot stopped playing audio."""
-    stream = LocalStream(_robot(), conversation_factory=lambda voice: _conversation())
+    stream = LocalStream(make_robot(), conversation_factory=lambda voice: make_conversation())
     activity = stream.conversation.set_activity_observer.call_args.args[0]
-    stream._mic_muted = True
+    await stream.set_muted(True)
     activity("playback_started")
     activity("interaction")
     status = stream.snapshot()
@@ -134,8 +107,8 @@ async def test_restart_resolves_voice_without_waiting_for_remote_shutdown(
     tmp_path, monkeypatch: pytest.MonkeyPatch, voice_override: str | None, expected: str
 ) -> None:
     """Accept a restart locally using the same voice precedence as app startup."""
-    conversation = _conversation()
-    stream = LocalStream(_robot(), conversation_factory=lambda voice: conversation, instance_path=tmp_path)
+    conversation = make_conversation()
+    stream = LocalStream(make_robot(), conversation_factory=lambda voice: conversation, instance_path=tmp_path)
     stream._asyncio_loop = asyncio.get_running_loop()
     write_startup_settings(tmp_path, profile=None, voice=voice_override)
     monkeypatch.setattr(console_module, "get_profile_instructions", lambda: "Profile instructions")
@@ -155,8 +128,8 @@ async def test_session_logs_end_reason_and_reconnect_delay(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Distinguish unexpected session endings from requested restarts and stops."""
-    conversation = _conversation()
-    stream = LocalStream(_robot(), conversation_factory=MagicMock(return_value=conversation))
+    conversation = make_conversation()
+    stream = LocalStream(make_robot(), conversation_factory=lambda voice: conversation)
     monkeypatch.setattr(console_module, "has_openai_api_key", lambda: True)
     retry = AsyncMock()
     monkeypatch.setattr(stream, "_wait_for_restart", retry)
@@ -192,7 +165,7 @@ async def test_session_logs_end_reason_and_reconnect_delay(
 @pytest.mark.asyncio
 async def test_microphone_mute_logs_only_changes(caplog: pytest.LogCaptureFixture) -> None:
     """Local microphone control remains available before the network loop starts."""
-    stream = LocalStream(_robot(), conversation_factory=lambda voice: _conversation())
+    stream = LocalStream(make_robot(), conversation_factory=lambda voice: make_conversation())
     with caplog.at_level(logging.INFO, logger=console_module.__name__):
         for muted in (False, True, True, False):
             await stream.set_muted(muted)
@@ -207,7 +180,7 @@ async def test_microphone_mute_logs_only_changes(caplog: pytest.LogCaptureFixtur
 @pytest.mark.asyncio
 async def test_restart_without_api_key_waits_instead_of_spinning(monkeypatch: pytest.MonkeyPatch) -> None:
     """A restart with no credential must leave the event loop responsive."""
-    stream = LocalStream(_robot(), conversation_factory=lambda voice: _conversation())
+    stream = LocalStream(make_robot(), conversation_factory=lambda voice: make_conversation())
     stream.conversation.connected = False
     monkeypatch.setattr(console_module, "has_openai_api_key", lambda: False)
     await stream.request_restart("test")
@@ -224,7 +197,7 @@ async def test_restart_without_api_key_waits_instead_of_spinning(monkeypatch: py
 @pytest.mark.asyncio
 async def test_api_key_persistence_failure_keeps_runtime_credential(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed credential save must not silently switch the running configuration."""
-    stream = LocalStream(_robot(), conversation_factory=lambda voice: _conversation(), instance_path=tmp_path)
+    stream = LocalStream(make_robot(), conversation_factory=lambda voice: make_conversation(), instance_path=tmp_path)
     monkeypatch.setenv(console_module.OPENAI_API_KEY_ENV, "existing-key")
     (tmp_path / ".env").mkdir()
     with pytest.raises(OSError):
@@ -240,23 +213,24 @@ async def test_record_loop_warns_once_when_microphone_frames_are_missing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Report a sustained capture failure without flooding logs."""
-    conversation = _conversation()
-    robot = _robot()
-    stream = LocalStream(robot, conversation_factory=MagicMock(return_value=conversation))
+    conversation = make_conversation()
+    robot = make_robot()
+    stream = LocalStream(robot, conversation_factory=lambda voice: conversation)
     robot.media.get_audio_sample.return_value = None
     monkeypatch.setattr(console_module, "MICROPHONE_FRAME_TIMEOUT_SECONDS", 0.0)
+    recovered = asyncio.Event()
+    conversation.interrupt.side_effect = recovered.set
 
     with caplog.at_level(logging.INFO, logger=console_module.__name__):
-        capture_task = asyncio.create_task(stream.record_loop())
-        while robot.media.start_playing.call_count == 0:
-            await asyncio.sleep(0)
-        robot.media.stop_recording.assert_called_once_with()
-        robot.media.start_recording.assert_called_once_with()
-        robot.media.start_playing.assert_called_once_with()
-        conversation.clear_playback.assert_called_once_with()
-        conversation.interrupt.assert_awaited_once_with()
-        stream.close()
-        await asyncio.wait_for(capture_task, timeout=1.0)
+        async with running_task(stream.record_loop()) as capture:
+            await asyncio.wait_for(recovered.wait(), timeout=2)
+            robot.media.stop_recording.assert_called_once_with()
+            robot.media.start_recording.assert_called_once_with()
+            robot.media.start_playing.assert_called_once_with()
+            conversation.clear_playback.assert_called_once_with()
+            conversation.interrupt.assert_awaited_once_with()
+            stream.close()
+            await asyncio.wait_for(capture, timeout=2)
 
     assert sum("No usable microphone frames received" in message for message in caplog.messages) == 1
     conversation.receive.assert_not_awaited()
@@ -277,10 +251,10 @@ async def test_capture_recovery_restarts_media_before_bounded_live_interruption(
     )
     conversation = LiveConversation(dependencies, voice="gleam", output_sample_rate=48_000)
     conversation.output_queue.put_nowait(PlaybackAudio(np.ones(48_000, dtype=np.float32)))
-    robot = _robot()
+    robot = make_robot()
     recovered_audio = np.ones((2, 1_600), dtype=np.float32)
     robot.media.get_audio_sample.side_effect = lambda: recovered_audio if robot.media.start_recording.called else None
-    stream = LocalStream(robot, conversation_factory=MagicMock(return_value=conversation))
+    stream = LocalStream(robot, conversation_factory=lambda voice: conversation)
     monkeypatch.setattr(console_module, "MICROPHONE_FRAME_TIMEOUT_SECONDS", 0.0)
     monkeypatch.setattr(realtime_module, "SEND_TIMEOUT_SECONDS", 0.01)
 
@@ -296,12 +270,8 @@ async def test_capture_recovery_restarts_media_before_bounded_live_interruption(
         session=SimpleNamespace(instructions=SimpleNamespace(append=instructions))
     )
 
-    capture_task = asyncio.create_task(stream.record_loop())
-    try:
+    async with running_task(stream.record_loop()):
         microphone_pcm = await asyncio.wait_for(conversation._microphone_queue.get(), timeout=1.0)
-    finally:
-        capture_task.cancel()
-        await asyncio.gather(capture_task, return_exceptions=True)
 
     robot.media.audio.clear_player.assert_called()
     robot.media.stop_recording.assert_called_once_with()
@@ -317,16 +287,18 @@ async def test_capture_recovery_restarts_media_before_bounded_live_interruption(
 @pytest.mark.asyncio
 async def test_record_loop_logs_and_forwards_first_microphone_frame(caplog: pytest.LogCaptureFixture) -> None:
     """Identify the capture and forwarding boundary from the first usable frame."""
-    conversation = _conversation()
-    robot = _robot()
-    stream = LocalStream(robot, conversation_factory=MagicMock(return_value=conversation))
+    conversation = make_conversation()
+    robot = make_robot()
+    stream = LocalStream(robot, conversation_factory=lambda voice: conversation)
     robot.media.get_audio_sample.return_value = np.ones((2, 160), dtype=np.float32)
+    forwarded = asyncio.Event()
+    conversation.receive.side_effect = lambda frame: forwarded.set()
 
     with caplog.at_level(logging.INFO, logger=console_module.__name__):
-        capture_task = asyncio.create_task(stream.record_loop())
-        await asyncio.sleep(0.05)
-        stream.close()
-        await asyncio.wait_for(capture_task, timeout=1.0)
+        async with running_task(stream.record_loop()) as capture:
+            await asyncio.wait_for(forwarded.wait(), timeout=2)
+            stream.close()
+            await asyncio.wait_for(capture, timeout=2)
 
     assert any("Microphone capture started" in message for message in caplog.messages)
     assert conversation.receive.await_count > 0
@@ -335,12 +307,12 @@ async def test_record_loop_logs_and_forwards_first_microphone_frame(caplog: pyte
 @pytest.mark.asyncio
 async def test_muted_microphone_forwards_silence_without_changing_capture() -> None:
     """Keep Live's audio clock running while withholding microphone contents."""
-    conversation = _conversation()
-    robot = _robot()
+    conversation = make_conversation()
+    robot = make_robot()
     captured = np.ones((2, 160), dtype=np.float32)
     robot.media.get_audio_sample.return_value = captured
-    stream = LocalStream(robot, conversation_factory=MagicMock(return_value=conversation))
-    stream._mic_muted = True
+    stream = LocalStream(robot, conversation_factory=lambda voice: conversation)
+    await stream.set_muted(True)
     conversation.receive.side_effect = lambda _frame: stream._stop_event.set()
 
     await stream.record_loop()
@@ -355,7 +327,7 @@ async def test_muted_microphone_forwards_silence_without_changing_capture() -> N
 @pytest.mark.asyncio
 async def test_play_loop_pushes_chunks_without_waiting_for_playback_tracking() -> None:
     """Keep the player fed and finish playback tracking only after queued audio drains."""
-    conversation = _conversation()
+    conversation = make_conversation()
     chunks = [PlaybackAudio(np.ones(19_200, dtype=np.float32)) for _ in range(3)]
     for chunk in chunks:
         conversation.output_queue.put_nowait(chunk)
@@ -372,24 +344,18 @@ async def test_play_loop_pushes_chunks_without_waiting_for_playback_tracking() -
 
     conversation.acknowledge_after_playback.side_effect = acknowledge
     conversation.acknowledge_playback_end.side_effect = playback_ended.set
-    robot = _robot()
+    robot = make_robot()
     robot.media.push_audio_sample.side_effect = lambda samples: (
         pushed_third.set() if samples is chunks[2].samples else None
     )
-    stream = LocalStream(robot, conversation_factory=MagicMock(return_value=conversation))
-    playback_task = asyncio.create_task(stream.play_loop())
-    acknowledgement_task = asyncio.create_task(stream._acknowledge_playback_loop())
-    try:
+    stream = LocalStream(robot, conversation_factory=lambda voice: conversation)
+    async with running_task(stream.play_loop()), running_task(stream._acknowledge_playback_loop()):
         await asyncio.wait_for(pushed_third.wait(), timeout=1.0)
         assert len(tracked) == 1
         assert tracked[0] is chunks[0]
         assert not playback_ended.is_set()
         tracking_release.set()
         await asyncio.wait_for(playback_ended.wait(), timeout=1.0)
-    finally:
-        playback_task.cancel()
-        acknowledgement_task.cancel()
-        await asyncio.gather(playback_task, acknowledgement_task, return_exceptions=True)
 
     assert len(tracked) == 3
     assert all(actual is expected for actual, expected in zip(tracked, chunks, strict=True))
@@ -415,7 +381,7 @@ async def test_interruption_discards_old_tracking_before_new_audio() -> None:
         conversation.output_queue.put_nowait(PlaybackAudio(np.ones(48_000, dtype=np.float32)))
     old_audio_pushed = asyncio.Event()
     fresh_audio_pushed = asyncio.Event()
-    robot = _robot()
+    robot = make_robot()
 
     def push_audio(_samples: np.ndarray) -> None:
         if robot.media.push_audio_sample.call_count == 2:
@@ -424,10 +390,8 @@ async def test_interruption_discards_old_tracking_before_new_audio() -> None:
             fresh_audio_pushed.set()
 
     robot.media.push_audio_sample.side_effect = push_audio
-    stream = LocalStream(robot, conversation_factory=MagicMock(return_value=conversation))
-    playback_task = asyncio.create_task(stream.play_loop())
-    acknowledgement_task = asyncio.create_task(stream._acknowledge_playback_loop())
-    try:
+    stream = LocalStream(robot, conversation_factory=lambda voice: conversation)
+    async with running_task(stream.play_loop()), running_task(stream._acknowledge_playback_loop()):
         await asyncio.wait_for(old_audio_pushed.wait(), timeout=1.0)
         await conversation.interrupt()
         assert stream._playback_acknowledgements.empty()
@@ -440,17 +404,13 @@ async def test_interruption_discards_old_tracking_before_new_audio() -> None:
             )
         )
         await asyncio.wait_for(fresh_audio_pushed.wait(), timeout=1.0)
-    finally:
-        playback_task.cancel()
-        acknowledgement_task.cancel()
-        await asyncio.gather(playback_task, acknowledgement_task, return_exceptions=True)
 
 
 def test_close_finalizes_while_session_receiver_is_alive(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the session receiver running until shutdown receives finalization."""
-    conversation = _conversation()
-    robot = _robot()
-    stream = LocalStream(robot, conversation_factory=MagicMock(return_value=conversation))
+    conversation = make_conversation()
+    robot = make_robot()
+    stream = LocalStream(robot, conversation_factory=lambda voice: conversation)
     receiver_started = asyncio.Event()
     finalized = asyncio.Event()
     receiver_exited = False
@@ -494,15 +454,15 @@ def test_close_finalizes_while_session_receiver_is_alive(monkeypatch: pytest.Mon
 @pytest.mark.asyncio
 async def test_restart_cancels_stalled_startup_after_finalization(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep local controls responsive while the session owner finalizes a stalled connection."""
-    connecting = _conversation()
-    replacement = _conversation()
+    connecting = make_conversation()
+    replacement = make_conversation()
     connecting.history = [("user", "Old dialogue")]
     started = asyncio.Event()
     shutdown_started = asyncio.Event()
     finish_shutdown = asyncio.Event()
     startup_cancelled = asyncio.Event()
     conversations = iter((connecting, replacement))
-    stream = LocalStream(_robot(), conversation_factory=lambda voice: next(conversations))
+    stream = LocalStream(make_robot(), conversation_factory=lambda voice: next(conversations))
     monkeypatch.setattr(console_module, "has_openai_api_key", lambda: True)
 
     async def connect() -> None:
@@ -522,8 +482,7 @@ async def test_restart_cancels_stalled_startup_after_finalization(monkeypatch: p
     connecting.start_up = AsyncMock(side_effect=connect)
     connecting.shutdown.side_effect = shutdown
     replacement.start_up = AsyncMock(side_effect=start_replacement)
-    session = asyncio.create_task(stream._run_session_loop())
-    try:
+    async with running_task(stream._run_session_loop()) as session:
         await asyncio.wait_for(started.wait(), timeout=1.0)
         await stream.request_restart("configuration_changed")
         await asyncio.wait_for(shutdown_started.wait(), timeout=1.0)
@@ -533,9 +492,6 @@ async def test_restart_cancels_stalled_startup_after_finalization(monkeypatch: p
         assert not startup_cancelled.is_set()
         finish_shutdown.set()
         await asyncio.wait_for(session, timeout=1.0)
-    finally:
-        session.cancel()
-        await asyncio.gather(session, return_exceptions=True)
     assert startup_cancelled.is_set()
     replacement.start_up.assert_awaited_once_with()
     assert replacement.history == []
@@ -544,8 +500,8 @@ async def test_restart_cancels_stalled_startup_after_finalization(monkeypatch: p
 @pytest.mark.asyncio
 async def test_cancelled_rpc_cancels_work_on_the_audio_loop() -> None:
     """A caller deadline must cancel its remote send across the ASGI and audio event loops."""
-    conversation = _conversation()
-    stream = LocalStream(_robot(), conversation_factory=lambda voice: conversation)
+    conversation = make_conversation()
+    stream = LocalStream(make_robot(), conversation_factory=lambda voice: conversation)
     caller_loop = asyncio.get_running_loop()
     owner_loop = asyncio.new_event_loop()
     started = asyncio.Event()
@@ -561,7 +517,7 @@ async def test_cancelled_rpc_cancels_work_on_the_audio_loop() -> None:
 
     conversation.say = AsyncMock(side_effect=say)
     stream._asyncio_loop = owner_loop
-    owner = Thread(target=owner_loop.run_forever)
+    owner = Thread(target=owner_loop.run_forever, daemon=True)
     owner.start()
     request = asyncio.create_task(stream.say("hello"))
     try:
@@ -574,5 +530,6 @@ async def test_cancelled_rpc_cancels_work_on_the_audio_loop() -> None:
         request.cancel()
         await asyncio.gather(request, return_exceptions=True)
         owner_loop.call_soon_threadsafe(owner_loop.stop)
-        await asyncio.to_thread(owner.join)
+        await asyncio.to_thread(owner.join, 2)
+        assert not owner.is_alive(), "The audio event loop did not stop"
         owner_loop.close()

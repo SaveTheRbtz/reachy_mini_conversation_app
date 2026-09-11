@@ -70,3 +70,20 @@ def test_bundled_profiles_enable_head_tracking_by_default() -> None:
         profile = read_profile_from_directory(profile_name, DEFAULT_PROFILES_DIRECTORY / profile_name)
 
         assert "head_tracking" in profile.default_tools, profile_name
+
+
+def test_failed_profile_replacement_preserves_saved_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed disk commit leaves the previous profile readable."""
+    directory = tmp_path / "guide"
+    write_profile("guide", directory, "Original instructions.", ["camera"])
+
+    def unavailable(self: Path, target: Path) -> Path:
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(Path, "replace", unavailable)
+    with pytest.raises(OSError, match="disk unavailable"):
+        write_profile("guide", directory, "Replacement instructions.", ["dance"])
+
+    saved = read_profile_from_directory("guide", directory)
+    assert saved.instructions == "Original instructions."
+    assert saved.default_tools == ("camera",)

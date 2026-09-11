@@ -1,20 +1,12 @@
-import os
 from pathlib import Path
 
 import pytest
-from test_openai_live import _live_session, _wait_for_content
 
+from tests.live.session import live_session, wait_for_content
 from reachy_mini_conversation_app.memory import MemorySnapshot, load_memory, save_memory
 
 
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.asyncio,
-    pytest.mark.skipif(
-        os.getenv("RUN_OPENAI_ITESTS") != "1",
-        reason="set RUN_OPENAI_ITESTS=1 to run paid OpenAI integration tests",
-    ),
-]
+pytestmark = [pytest.mark.live, pytest.mark.asyncio, pytest.mark.enable_socket]
 
 
 @pytest.mark.parametrize(
@@ -42,9 +34,9 @@ async def test_live_backend_replaces_memory_without_losing_unrelated_facts(
     original = MemorySnapshot(memories=["Maya enjoys astronomy.", "Leo prefers chess."])
     save_memory(original, tmp_path)
 
-    async with _live_session(tmp_path) as conversation:
+    async with live_session(tmp_path) as conversation:
         await conversation.say(f"{statement} Use manage_memory and confirm only after saving.")
-        await _wait_for_content(
+        await wait_for_content(
             conversation,
             lambda text: conversation.dependencies.memory != original and conversation.backend_completions >= 2,
         )

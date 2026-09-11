@@ -156,17 +156,32 @@ async def test_profile_crud_preserves_inheritance_and_resource_identity(api: Api
 
 
 @pytest.mark.asyncio
-async def test_duplicate_and_unsafe_profile_ids_are_rejected(api: ApiFixture) -> None:
-    """Creation has explicit existence and safe-name semantics."""
+async def test_duplicate_profile_creation_preserves_existing_content(api: ApiFixture) -> None:
+    """Creating an existing ID must not overwrite its stored personality."""
     await _create(api)
     duplicate = await api.call("CreateProfile", {"profileId": "user-guide", "profile": {"instructions": "New."}})
     assert duplicate.json()["code"] == "already_exists"
-    for profile_id in ("builtin-guide", "user-../escape", "user-Upper", "user-has_underscore", "user-1guide"):
-        invalid = await api.call("CreateProfile", {"profileId": profile_id, "profile": {"instructions": "New."}})
-        assert invalid.json()["code"] == "invalid_argument", profile_id
-    for name in ("user_personalities/guide", "profiles/user-../guide", "profiles/builtin-default/../guide"):
-        invalid = await api.call("GetProfile", {"name": name})
-        assert invalid.json()["code"] == "invalid_argument", name
+    assert read_profile("user_personalities/guide").instructions == "Guide instructions."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "profile_id", ["builtin-guide", "user-../escape", "user-Upper", "user-has_underscore", "user-1guide"]
+)
+async def test_new_profile_ids_require_safe_user_names(api: ApiFixture, profile_id: str) -> None:
+    """New resource IDs cannot escape storage or claim a bundled identity."""
+    response = await api.call("CreateProfile", {"profileId": profile_id, "profile": {"instructions": "New."}})
+    assert response.json()["code"] == "invalid_argument", response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name", ["user_personalities/guide", "profiles/user-../guide", "profiles/builtin-default/../guide"]
+)
+async def test_profile_lookups_reject_nonresource_paths(api: ApiFixture, name: str) -> None:
+    """Storage paths and traversal expressions are not public resource names."""
+    response = await api.call("GetProfile", {"name": name})
+    assert response.json()["code"] == "invalid_argument", response.text
 
 
 @pytest.mark.asyncio
@@ -423,6 +438,30 @@ async def test_network_errors_use_canonical_unavailable_status(
     response = await api.call("SendConversationText", {"name": "conversation", "text": "Hello"})
     assert response.json()["code"] == "unavailable"
     assert "remote disconnected" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_server_deadline_cancels_stalled_command(api: ApiFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The server enforces a caller deadline even when the client keeps waiting."""
+    cancelled = asyncio.Event()
+
+    async def blocked(text: str) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(api.control, "say", blocked)
+    response = await asyncio.wait_for(
+        api.client.post(
+            "/rpc/reachy.conversation.v1.ConversationService/SendConversationText",
+            json={"name": "conversation", "text": "Hello"},
+            headers={"Connect-Timeout-Ms": "100"},
+        ),
+        timeout=2,
+    )
+    assert response.json()["code"] == "deadline_exceeded", response.text
+    assert cancelled.is_set()
 
 
 @pytest.mark.asyncio

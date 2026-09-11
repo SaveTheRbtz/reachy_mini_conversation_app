@@ -1,6 +1,5 @@
 import json
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from collections.abc import AsyncIterator
 
@@ -16,20 +15,18 @@ from websockets.asyncio.client import ClientConnection
 from websockets.datastructures import Headers
 from openai.resources.live.live import AsyncLiveConnection
 
+from tests.support.realtime import make_conversation
 import reachy_mini_conversation_app.realtime as realtime_module
-from reachy_mini_conversation_app.memory import MemorySnapshot
 from reachy_mini_conversation_app.realtime import LiveConversation
+
+
+pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
 def conversation() -> LiveConversation:
     """Build a conversation with observable movement state."""
-    dependencies = SimpleNamespace(
-        instance_path=None,
-        memory=MemorySnapshot(memories=[]),
-        movement_manager=SimpleNamespace(set_speaking=MagicMock()),
-    )
-    return LiveConversation(dependencies, voice="gleam", output_sample_rate=24_000)
+    return make_conversation()
 
 
 @pytest_asyncio.fixture

@@ -33,6 +33,7 @@ dev = [
   "pytest",
   "pytest-asyncio",
   "pytest-cov>=7.1.0",
+  "pytest-socket>=0.7.0",
   "ruff>=0.15.20",
   "mypy>=2.2.0",
   "pre-commit",
@@ -107,6 +108,7 @@ include = [
   "/tsconfig*.json",
   "/vite.config.ts",
   "/playwright.config.ts",
+  "/vitest.config.ts",
   "/.prettier*",
   "/.env.example",
   "/README.md",
@@ -168,6 +170,11 @@ module = ["reachy_mini", "reachy_mini.*", "reachy_mini_dances_library", "reachy_
 follow_untyped_imports = true
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib --strict-config --strict-markers --allow-hosts=127.0.0.1,::1 --allow-unix-socket -m 'not live and not packaging'"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
-  "integration: opt-in tests that call paid external APIs",
+  "integration: local tests of production library and transport boundaries",
+  "packaging: clean source builds and installed distribution checks (requires build network access)",
+  "live: opt-in paid OpenAI evaluations; select explicitly with -m live",
 ]

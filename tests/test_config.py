@@ -25,13 +25,13 @@ def test_get_default_voice(monkeypatch: pytest.MonkeyPatch, raw_value: str, expe
     "raw_value, expected",
     [
         ("45", 45.0),
-        ("", 15.0),  # unset/blank falls back to the default
-        ("soon", 15.0),  # unparseable falls back to the default
-        ("0", None),  # non-positive disables the watchdog
+        ("", 15.0),
+        ("soon", 15.0),
+        ("0", None),
         ("-1", None),
     ],
 )
-def test_resolve_app_timeout_minutes(monkeypatch, raw_value, expected) -> None:
+def test_resolve_app_timeout_minutes(monkeypatch: pytest.MonkeyPatch, raw_value: str, expected: float | None) -> None:
     """The env timeout parses to minutes, falls back to the default, or disables on non-positive."""
     monkeypatch.setenv(config.APP_TIMEOUT_MINUTES_ENV, raw_value)
 

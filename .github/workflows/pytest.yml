@@ -59,9 +59,6 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
-          # Fetch LFS content: the personality avatar SVGs (*.svg is LFS-tracked)
-          # are read by tests/test_personality_avatars.py; without this the
-          # checkout leaves LFS pointer files and the "<svg" assertions fail.
           lfs: true
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
@@ -75,21 +72,12 @@ jobs:
 
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
 
-      # Test .env
-      - name: Create test .env
-        shell: bash
-        run: |
-          printf "OPENAI_API_KEY=test-dummy\n" > .env
-
       # Install
       - name: Install (frozen)
         run: uv sync --frozen --group dev
 
-      # Tests
-      - name: Run tests (Linux / macOS)
-        if: runner.os != 'Windows'
-        run: .venv/bin/pytest -q
+      - name: Test application behavior and local SDK integration
+        run: uv run --no-sync pytest -q
 
-      - name: Run tests (Windows)
-        if: runner.os == 'Windows'
-        run: .venv/Scripts/pytest -q
+      - name: Test clean source and installed distributions
+        run: uv run --no-sync pytest -m packaging -q
