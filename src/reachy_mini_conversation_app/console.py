@@ -446,6 +446,12 @@ class LocalStream:
                         self._robot.media.start_playing()
                     except Exception as error:
                         logger.warning("Failed to restart robot media after microphone stall: %s", error)
+                    try:
+                        await self._conversation.interrupt()
+                    except Exception as error:
+                        logger.warning(
+                            "Failed to interrupt Live after microphone recovery: %s: %s", type(error).__name__, error
+                        )
                 await asyncio.sleep(MICROPHONE_RETRY_DELAY_SECONDS)
                 continue
             if capture_stalled:

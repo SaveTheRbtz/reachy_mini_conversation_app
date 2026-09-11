@@ -256,7 +256,7 @@ def test_microphone_network_failure_reconnects_without_stopping_media(
     client.live.connect.side_effect = [failed_transport, recovered_transport]
     monkeypatch.setattr(realtime_module, "AsyncOpenAI", MagicMock(return_value=client))
     monkeypatch.setattr(realtime_module.config, "OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(realtime_module, "MICROPHONE_SEND_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(realtime_module, "SEND_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(console_module, "RETRY_DELAY_SECONDS", 0.0)
     monkeypatch.setattr(console_module.asyncio, "to_thread", AsyncMock())
     robot = MagicMock()

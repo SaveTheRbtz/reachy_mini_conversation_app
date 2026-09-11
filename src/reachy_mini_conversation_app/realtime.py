@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 OPENAI_SAMPLE_RATE: Final = 24_000
 AUDIO_WARNING_INTERVAL_SECONDS = 60.0
-MICROPHONE_SEND_TIMEOUT_SECONDS = 5.0
+SEND_TIMEOUT_SECONDS = 5.0
 SESSION_TIMEOUT_SECONDS = 15.0
 TOOL_TIMEOUT_SECONDS = 30.0
 HISTORY_MAX_MESSAGES = 32
@@ -340,7 +340,7 @@ class LiveConversation:
         while True:
             pcm16 = await self._microphone_queue.get()
             try:
-                async with asyncio.timeout(MICROPHONE_SEND_TIMEOUT_SECONDS):
+                async with asyncio.timeout(SEND_TIMEOUT_SECONDS):
                     await connection.session.input_audio.append(audio=base64.b64encode(pcm16).decode("ascii"))
             except (TimeoutError, OSError, ConnectionClosed) as error:
                 logger.warning("Live microphone send failed: %s", type(error).__name__)
@@ -389,14 +389,15 @@ class LiveConversation:
     async def interrupt(self) -> None:
         """Clear local playback and ask Live to stop speaking and listen."""
         self.clear_playback()
+        self.acknowledge_playback_end()
         connection = self._connection
         if connection is not None and not self._closing:
-            await connection.session.instructions.append(
-                event_id=str(uuid4()),
-                delegation_id=None,
-                content="Stop speaking now and listen. Wait for the user's next request.",
-            )
-        self.acknowledge_playback_end()
+            async with asyncio.timeout(SEND_TIMEOUT_SECONDS):
+                await connection.session.instructions.append(
+                    event_id=str(uuid4()),
+                    delegation_id=None,
+                    content="Stop speaking now and listen. Wait for the user's next request.",
+                )
 
     async def acknowledge_after_playback(self, audio: PlaybackAudio) -> None:
         """Track a queued chunk for its estimated robot playback duration."""

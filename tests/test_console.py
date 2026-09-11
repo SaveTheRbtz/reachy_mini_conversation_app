@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from openai.types.live.output_audio_delta_event import OutputAudioDeltaEvent
 
 import reachy_mini_conversation_app.console as console_module
+import reachy_mini_conversation_app.realtime as realtime_module
 from reachy_mini_conversation_app.memory import MemorySnapshot
 from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.realtime import PlaybackAudio, LiveConversation
@@ -156,6 +157,7 @@ async def test_record_loop_warns_once_when_microphone_frames_are_missing(
         robot.media.start_recording.assert_called_once_with()
         robot.media.start_playing.assert_called_once_with()
         conversation.clear_playback.assert_called_once_with()
+        conversation.interrupt.assert_awaited_once_with()
         stream.close()
         await asyncio.wait_for(capture_task, timeout=1.0)
 
@@ -164,24 +166,38 @@ async def test_record_loop_warns_once_when_microphone_frames_are_missing(
 
 
 @pytest.mark.asyncio
-async def test_capture_recovery_forwards_frames_without_waiting_for_live(
+@pytest.mark.parametrize("stalled", [False, True])
+async def test_capture_recovery_restarts_media_before_bounded_live_interruption(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    stalled: bool,
 ) -> None:
-    """Restart local capture even when a remote interruption would never finish."""
+    """Stop remote speech after local recovery without blocking on a stalled write."""
     dependencies = SimpleNamespace(
         instance_path=None,
         memory=MemorySnapshot(memories=[]),
         movement_manager=SimpleNamespace(set_listening=MagicMock(), set_speaking=MagicMock()),
     )
     conversation = LiveConversation(dependencies, voice="gleam", output_sample_rate=48_000)
-    conversation._connection = SimpleNamespace()
-    monkeypatch.setattr(conversation, "interrupt", AsyncMock(side_effect=asyncio.Event().wait))
     conversation.output_queue.put_nowait(PlaybackAudio(np.ones(48_000, dtype=np.float32)))
     robot = _robot()
     recovered_audio = np.ones((2, 1_600), dtype=np.float32)
     robot.media.get_audio_sample.side_effect = lambda: recovered_audio if robot.media.start_recording.called else None
     stream = LocalStream(robot, conversation_factory=MagicMock(return_value=conversation))
     monkeypatch.setattr(console_module, "MICROPHONE_FRAME_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(realtime_module, "SEND_TIMEOUT_SECONDS", 0.01)
+
+    async def interrupt_live(**_kwargs: object) -> None:
+        robot.media.start_recording.assert_called_once_with()
+        robot.media.start_playing.assert_called_once_with()
+        assert conversation.output_queue.empty()
+        if stalled:
+            await asyncio.Event().wait()
+
+    instructions = AsyncMock(side_effect=interrupt_live)
+    conversation._connection = SimpleNamespace(
+        session=SimpleNamespace(instructions=SimpleNamespace(append=instructions))
+    )
 
     capture_task = asyncio.create_task(stream.record_loop())
     try:
@@ -190,12 +206,15 @@ async def test_capture_recovery_forwards_frames_without_waiting_for_live(
         capture_task.cancel()
         await asyncio.gather(capture_task, return_exceptions=True)
 
-    robot.media.audio.clear_player.assert_called_once_with()
+    robot.media.audio.clear_player.assert_called()
     robot.media.stop_recording.assert_called_once_with()
     robot.media.start_recording.assert_called_once_with()
     robot.media.start_playing.assert_called_once_with()
     assert conversation.output_queue.empty()
     assert np.max(np.frombuffer(microphone_pcm, dtype="<i2")) > 30_000
+    instructions.assert_awaited_once()
+    assert "Stop speaking now and listen" in instructions.await_args.kwargs["content"]
+    assert ("Failed to interrupt Live after microphone recovery" in caplog.text) is stalled
 
 
 @pytest.mark.asyncio
