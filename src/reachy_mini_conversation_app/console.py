@@ -71,6 +71,8 @@ class LocalStream:
         self._rpc: JsonRpcServer | None = None
         self._settings_initialized = False
         self._mic_muted = False
+        self._playing = False
+        self._last_interaction_at = time.monotonic()
         self._connection_state = "not_started"
         self._connection_error: str | None = None
         self._install_conversation(self._conversation)
@@ -82,14 +84,22 @@ class LocalStream:
 
     def _install_conversation(self, conversation: LiveConversation) -> None:
         self._conversation = conversation
+        self._playing = False
         conversation.set_clear_player(self._clear_player)
         conversation.set_activity_observer(self._dispatch_activity)
 
     def seconds_since_activity(self) -> float:
-        """Return seconds since the active conversation last changed state."""
-        return time.monotonic() - self._conversation.last_activity_time
+        """Return seconds since spoken or typed dialogue, across reconnects."""
+        return time.monotonic() - self._last_interaction_at
 
     def _dispatch_activity(self, reason: str) -> None:
+        if reason == "interaction":
+            self._last_interaction_at = time.monotonic()
+            return
+        if reason == "playback_started":
+            self._playing = True
+        elif reason in {"playback_stopped", "disconnected"}:
+            self._playing = False
         if self._rpc is not None:
             self._rpc.broadcast_threadsafe("conversation.activity", {"reason": reason})
 
@@ -175,6 +185,8 @@ class LocalStream:
             "connection_state": "connected" if self._conversation.connected else self._connection_state,
             "connection_error": None if self._conversation.connected else self._connection_error,
             "voice": self._voice,
+            "muted": self._mic_muted,
+            "playing": self._playing,
         }
 
     def init_settings_ui(self) -> None:

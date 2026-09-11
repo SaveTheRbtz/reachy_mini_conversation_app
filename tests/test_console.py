@@ -20,7 +20,6 @@ def _conversation() -> SimpleNamespace:
     return SimpleNamespace(
         voice="gleam",
         history=[],
-        last_activity_time=0.0,
         connected=True,
         shutdown=AsyncMock(),
         receive=AsyncMock(),
@@ -50,12 +49,45 @@ def _robot() -> SimpleNamespace:
     )
 
 
+def test_inactivity_survives_reconnect_and_ignores_playback_notifications(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only dialogue refreshes the sleep deadline, including after a session replacement."""
+    now = 100.0
+    monkeypatch.setattr(console_module.time, "monotonic", lambda: now)
+    stream = LocalStream(_robot(), conversation_factory=lambda voice: _conversation())
+    activity = stream.conversation.set_activity_observer.call_args.args[0]
+    now = 200.0
+    activity("interaction")
+    now = 300.0
+    for reason in ("playback_started", "playback_stopped", "disconnected"):
+        activity(reason)
+    stream._install_conversation(_conversation())
+    activity = stream.conversation.set_activity_observer.call_args.args[0]
+    activity("connected")
+    assert stream.seconds_since_activity() == 100.0
+    now = 400.0
+    activity("interaction")
+    assert stream.seconds_since_activity() == 0.0
+
+
+def test_status_reports_microphone_and_playback_independently() -> None:
+    """A muted microphone does not imply that the robot stopped playing audio."""
+    stream = LocalStream(_robot(), conversation_factory=lambda voice: _conversation())
+    activity = stream.conversation.set_activity_observer.call_args.args[0]
+    stream._mic_muted = True
+    activity("playback_started")
+    activity("interaction")
+    status = stream._status()
+    assert status["muted"] is True
+    assert status["playing"] is True
+    activity("disconnected")
+    assert stream._status()["playing"] is False
+
+
 @pytest.mark.asyncio
 async def test_voice_change_persists_and_requests_one_session_restart(tmp_path) -> None:
     """Apply an immutable session voice through the stream's restart owner."""
     conversation = SimpleNamespace(
         voice="gleam",
-        last_activity_time=0.0,
         connected=True,
         shutdown=AsyncMock(),
         set_clear_player=MagicMock(),
@@ -257,7 +289,7 @@ async def test_muted_microphone_forwards_silence_without_changing_capture() -> N
 
 @pytest.mark.asyncio
 async def test_play_loop_pushes_chunks_without_waiting_for_playback_tracking() -> None:
-    """Keep the player fed and mark listening only after queued playback drains."""
+    """Keep the player fed and finish playback tracking only after queued audio drains."""
     conversation = _conversation()
     chunks = [PlaybackAudio(np.ones(19_200, dtype=np.float32)) for _ in range(3)]
     for chunk in chunks:

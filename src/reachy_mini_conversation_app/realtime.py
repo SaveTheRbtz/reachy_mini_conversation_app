@@ -125,7 +125,6 @@ class LiveConversation:
         self._history_role: Literal["user", "assistant"] | None = None
         self.output_queue: asyncio.Queue[PlaybackAudio] = asyncio.Queue()
         self._microphone_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=1)
-        self.last_activity_time = time.monotonic()
         self.usage_seconds = 0.0
         self._connection: AsyncLiveConnection | None = None
         self._transport: AsyncLiveConnection | None = None
@@ -157,8 +156,7 @@ class LiveConversation:
         """Attach the Reachy playback flush callback."""
         self._clear_player = clear_player
 
-    def _mark_activity(self, reason: str) -> None:
-        self.last_activity_time = time.monotonic()
+    def _notify_activity(self, reason: str) -> None:
         if self._activity_observer is not None:
             self._activity_observer(reason)
 
@@ -169,6 +167,7 @@ class LiveConversation:
             text = self.history.pop()[1] + text
         text = text.encode("utf-8")[-HISTORY_MAX_BYTES:].decode("utf-8", errors="ignore")
         self.history.append((role, text))
+        self._notify_activity("interaction")
         self._history_role = None if new_message else role
         while (
             len(self.history) > HISTORY_MAX_MESSAGES
@@ -252,7 +251,7 @@ class LiveConversation:
                             if event.type == "session.started":
                                 self._connection = connection
                                 logger.info("Live session started: session_id=%s", event.session.id)
-                                self._mark_activity("connected")
+                                self._notify_activity("connected")
                             elif event.type == "error":
                                 raise RuntimeError(
                                     f"Live startup failed: type={event.error.type} code={event.error.code}"
@@ -293,7 +292,7 @@ class LiveConversation:
                     self.dependencies.movement_manager.set_speaking(False)
                     self._connection = None
                     self._transport = None
-                    self._mark_activity("disconnected")
+                    self._notify_activity("disconnected")
                     await self._close_transport(connection)
 
     async def shutdown(self) -> None:
@@ -386,7 +385,6 @@ class LiveConversation:
             event_id = str(uuid4())
             self._backend_commands.add(event_id)
             await connection.response.create(event_id=event_id)
-        self._mark_activity("thinking")
 
     async def interrupt(self) -> None:
         """Clear local playback and ask Live to stop speaking and listen."""
@@ -404,7 +402,7 @@ class LiveConversation:
     async def acknowledge_after_playback(self, audio: PlaybackAudio) -> None:
         """Track a queued chunk for its estimated robot playback duration."""
         self.dependencies.movement_manager.set_speaking(True)
-        self._mark_activity("speaking")
+        self._notify_activity("playback_started")
         duration = audio.samples.size / self._bridge.output_sample_rate
         try:
             await asyncio.wait_for(self._playback_interrupted.wait(), timeout=duration)
@@ -412,9 +410,9 @@ class LiveConversation:
             return
 
     def acknowledge_playback_end(self) -> None:
-        """Mark listening when the local playback queue has drained."""
+        """Release the speaking pose when the local playback queue has drained."""
         self.dependencies.movement_manager.set_speaking(False)
-        self._mark_activity("listening")
+        self._notify_activity("playback_stopped")
 
     async def _handle_event(self, event: ServerEvent) -> None:
         if event.type == "session.output_audio.delta":
@@ -426,11 +424,8 @@ class LiveConversation:
                 self.output_queue.put_nowait(PlaybackAudio(samples))
         elif event.type == "session.input_transcript.delta":
             self._remember("user", event.delta)
-            self._mark_activity("listening")
         elif event.type == "session.output_transcript.delta":
             self._remember("assistant", event.delta)
-        elif event.type == "session.delegation.created":
-            self._mark_activity("thinking")
         elif event.type == "response.event":
             nested_type = event.event.get("type")
             try:
@@ -519,7 +514,6 @@ class LiveConversation:
                         batch.delegation_id,
                         batch.response_id,
                     )
-                    self._mark_activity("thinking")
                     output: object
                     if tool is None:
                         logger.warning("Rejected unavailable tool: %s", call.name)

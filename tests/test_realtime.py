@@ -215,6 +215,8 @@ async def test_session_gates_microphone_until_started_and_waits_for_final_usage(
 async def test_full_duplex_input_does_not_discard_speaking_audio(live_transport: LiveTransport) -> None:
     """Keep microphone and playback flowing when input transcripts overlap speech."""
     conversation = _conversation()
+    activity = MagicMock()
+    conversation.set_activity_observer(activity)
     task = asyncio.create_task(conversation.start_up())
     try:
         await live_transport.events.put(_event("session.started", session=SESSION))
@@ -227,6 +229,16 @@ async def test_full_duplex_input_does_not_discard_speaking_audio(live_transport:
         playback = await asyncio.wait_for(conversation.emit(), timeout=1)
         np.testing.assert_allclose(playback.samples, pcm.astype(np.float32) / 32768)
         assert conversation.output_queue.empty()
+        tracking = asyncio.create_task(conversation.acknowledge_after_playback(playback))
+        await _eventually(lambda: any(call.args == ("playback_started",) for call in activity.call_args_list))
+        activity.reset_mock()
+        await conversation._handle_event(
+            _event("session.input_transcript.delta", delta=" go on", start_ms=20, end_ms=30)
+        )
+        activity.assert_called_once_with("interaction")
+        await tracking
+        conversation.acknowledge_playback_end()
+        assert activity.call_args.args == ("playback_stopped",)
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

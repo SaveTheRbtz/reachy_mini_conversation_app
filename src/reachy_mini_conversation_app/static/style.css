@@ -1237,9 +1237,7 @@ button {
   margin-top: 4px;
 }
 
-/* 8. Conversation orb
- * Indicators are mounted statically (orb.js) and switched via [data-state]
- * + the inline --glow colour; Python drives the state, not audio. */
+/* 8. Microphone status and independent playback animation. */
 
 .convo-orb {
   --glow: #34d399;
@@ -1380,88 +1378,11 @@ button {
   to   { transform: scale(1) rotate(360deg); }
 }
 
-/* Per-dot animation, staggered ~160ms, so it composes cleanly with the
-   parent's show/hide scale(.85 -> 1). */
-.convo-orb__indicator > .ind-thinking {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-}
-.ind-thinking .dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.3;
-}
-.ind-thinking .dot:nth-child(1) { animation: orb-thinking-dot 1.25s ease-in-out infinite; animation-delay: 0s; }
-.ind-thinking .dot:nth-child(2) { animation: orb-thinking-dot 1.25s ease-in-out infinite; animation-delay: 0.16s; }
-.ind-thinking .dot:nth-child(3) { animation: orb-thinking-dot 1.25s ease-in-out infinite; animation-delay: 0.32s; }
-
-@keyframes orb-thinking-dot {
-  0%, 60%, 100% { transform: scale(0.7); opacity: 0.3; }
-  30%           { transform: scale(1.15); opacity: 1; }
-}
-
-/* Height capped at 42% so bars animating up to 100% of this container
-   never overflow into the core's inner edge. */
-.convo-orb__indicator > .ind-bars {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  height: 42%;
-}
-.ind-bars .bar {
-  width: 4px;
-  min-height: 4px;
-  height: 35%;
-  border-radius: 3px;
-  background: currentColor;
-  opacity: 0.7;
-}
-.convo-orb[data-state="listening"] .ind-bars .bar {
-  animation: orb-bar 0.9s ease-in-out infinite;
-}
-.ind-bars .bar:nth-child(1) { animation-delay: -0.2s; }
-.ind-bars .bar:nth-child(2) { animation-delay: -0.05s; }
-.ind-bars .bar:nth-child(3) { animation-delay: -0.35s; }
-.ind-bars .bar:nth-child(4) { animation-delay: -0.1s; }
-.ind-bars .bar:nth-child(5) { animation-delay: -0.25s; }
-
-@keyframes orb-bar {
-  0%, 100% { height: 35%; opacity: 0.7; }
-  50%      { height: 100%; opacity: 1; }
-}
-
-.ind-voice .wave {
-  transform-origin: 50% 50%;
-  opacity: 0;
-}
-.convo-orb[data-state="speaking"] .ind-voice .wave {
-  animation: orb-voice-wave 1.35s ease-out infinite;
-}
-.ind-voice .wave-1 { animation-delay: 0s; }
-.ind-voice .wave-2 { animation-delay: 0.35s; }
-
-@keyframes orb-voice-wave {
-  0%   { opacity: 0; transform: scale(0.7); }
-  30%  { opacity: 1; transform: scale(1); }
-  70%  { opacity: 0.2; transform: scale(1.12); }
-  100% { opacity: 0; transform: scale(0.7); }
-}
-
 /* Per-state visibility & ambient animations */
 
-/* .ind-mic (idle) is never set to opacity:1 explicitly, so any
-   [data-state] rule below wins via cascade. */
 .convo-orb[data-state="idle"] .ind-mic,
 .convo-orb[data-state="muted"] .ind-mic-off,
 .convo-orb[data-state="connecting"] .ind-spinner,
-.convo-orb[data-state="listening"] .ind-bars,
-.convo-orb[data-state="thinking"] .ind-thinking,
-.convo-orb[data-state="speaking"] .ind-voice,
 .convo-orb[data-state="error"] .ind-error {
   opacity: 1;
   transform: scale(1);
@@ -1479,30 +1400,16 @@ button {
   animation: orb-breathe 2.4s ease-in-out infinite;
 }
 
-/* Listening: brighter rings, both visible. */
-.convo-orb[data-state="listening"] .convo-orb__ring {
-  opacity: 0.85;
-  animation: orb-breathe 2s ease-in-out infinite;
-}
-.convo-orb[data-state="listening"] .convo-orb__ring-outer {
-  opacity: 0.45;
-}
-
-/* Thinking: dimmer than speaking so the 3-dot indicator stays the focus. */
-.convo-orb[data-state="thinking"] .convo-orb__core {
-  animation: orb-thinking-throb 1.4s ease-in-out infinite;
-}
-
-/* Speaking: outer ring fades in to convey audio radiating out. */
-.convo-orb[data-state="speaking"] .convo-orb__core {
+/* Playback remains visible while the microphone is muted. */
+.convo-orb[data-playing="true"] .convo-orb__core {
   animation: orb-speak 1.6s ease-in-out infinite;
 }
-.convo-orb[data-state="speaking"] .convo-orb__ring-outer {
+.convo-orb[data-playing="true"] .convo-orb__ring-outer {
   opacity: 0.4;
   animation: orb-ring-out 1.8s ease-out infinite;
 }
 
-/* Muted: perfectly still and dimmed so "paused" reads at a glance. */
+/* Muting affects input only. */
 .convo-orb[data-state="muted"] .convo-orb__glow {
   opacity: 0.25;
 }
@@ -1522,13 +1429,6 @@ button {
 @keyframes orb-ring-out {
   0%   { transform: translate(-50%, -50%) scale(1);    opacity: 0.4; }
   100% { transform: translate(-50%, -50%) scale(1.18); opacity: 0; }
-}
-
-@keyframes orb-thinking-throb {
-  0%, 100% { transform: scale(1);    box-shadow: 0 0 32px color-mix(in srgb, var(--glow) 18%, transparent),
-                                                inset 0 0 28px color-mix(in srgb, var(--glow) 14%, transparent); }
-  50%      { transform: scale(0.97); box-shadow: 0 0 26px color-mix(in srgb, var(--glow) 12%, transparent),
-                                                inset 0 0 22px color-mix(in srgb, var(--glow) 8%, transparent); }
 }
 
 @keyframes orb-speak {
