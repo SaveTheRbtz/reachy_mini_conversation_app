@@ -16,7 +16,7 @@ from reachy_mini import ReachyMini
 from reachy_mini.io.jsonrpc import JsonRpcError
 from reachy_mini.apps.jsonrpc_server import JsonRpcServer
 from reachy_mini_conversation_app.config import (
-    REALTIME_MODEL,
+    LIVE_MODEL,
     OPENAI_API_KEY_ENV,
     config,
     get_default_voice,
@@ -26,7 +26,7 @@ from reachy_mini_conversation_app.config import (
     refresh_runtime_config_from_env,
 )
 from reachy_mini_conversation_app.prompts import get_profile_instructions
-from reachy_mini_conversation_app.realtime import PlaybackAudio, RealtimeConversation
+from reachy_mini_conversation_app.realtime import PlaybackAudio, LiveConversation
 from reachy_mini_conversation_app.startup_settings import read_startup_settings, write_startup_settings
 from reachy_mini_conversation_app.tools.core_tools import get_function_tools, selected_tool_names
 from reachy_mini_conversation_app.personality_routes import build_personality_ops, register_personality_methods
@@ -35,8 +35,8 @@ from reachy_mini_conversation_app.audio.startup_config import apply_audio_startu
 
 
 logger = logging.getLogger(__name__)
-ConversationFactory = Callable[[str], RealtimeConversation]
-PlaybackAcknowledgement: TypeAlias = tuple[RealtimeConversation, PlaybackAudio | None]
+ConversationFactory = Callable[[str], LiveConversation]
+PlaybackAcknowledgement: TypeAlias = tuple[LiveConversation, PlaybackAudio]
 ResultT = TypeVar("ResultT")
 RETRY_DELAY_SECONDS = 5.0
 MICROPHONE_FRAME_TIMEOUT_SECONDS = 5.0
@@ -45,7 +45,7 @@ MICROPHONE_RETRY_DELAY_SECONDS = 0.01
 
 
 class LocalStream:
-    """Connect one Realtime conversation to Reachy Mini media and settings."""
+    """Connect one Live conversation to Reachy Mini media and settings."""
 
     def __init__(
         self,
@@ -76,11 +76,11 @@ class LocalStream:
         self._install_conversation(self._conversation)
 
     @property
-    def conversation(self) -> RealtimeConversation:
+    def conversation(self) -> LiveConversation:
         """Return the currently installed conversation."""
         return self._conversation
 
-    def _install_conversation(self, conversation: RealtimeConversation) -> None:
+    def _install_conversation(self, conversation: LiveConversation) -> None:
         self._conversation = conversation
         conversation.set_clear_player(self._clear_player)
         conversation.set_activity_observer(self._dispatch_activity)
@@ -105,7 +105,7 @@ class LocalStream:
 
     async def request_restart(self, reason: str) -> None:
         """Request one session restart from the owning stream loop."""
-        logger.info("Realtime restart requested: %s", reason)
+        logger.info("Live restart requested: %s", reason)
         self._connection_state = "connecting"
         self._restart_requested.set()
         await self._conversation.shutdown()
@@ -134,7 +134,7 @@ class LocalStream:
         return f"Voice changed to {voice}; restarting the conversation."
 
     async def get_available_voices(self) -> list[str]:
-        """Return supported OpenAI Realtime voices."""
+        """Return supported OpenAI Live voices."""
         return get_available_voices()
 
     def get_current_voice(self) -> str:
@@ -169,7 +169,7 @@ class LocalStream:
 
     def _status(self) -> dict[str, object]:
         return {
-            "model": REALTIME_MODEL,
+            "model": LIVE_MODEL,
             "has_key": has_openai_api_key(),
             "connected": self._conversation.connected,
             "connection_state": "connected" if self._conversation.connected else self._connection_state,
@@ -272,9 +272,7 @@ class LocalStream:
             attempt += 1
             started_at = time.monotonic()
             reason = "remote_close"
-            logger.info(
-                "Realtime connection attempt: attempt=%d model=%s voice=%s", attempt, REALTIME_MODEL, self._voice
-            )
+            logger.info("Live connection attempt: attempt=%d model=%s voice=%s", attempt, LIVE_MODEL, self._voice)
             try:
                 await conversation.start_up()
             except asyncio.CancelledError:
@@ -285,7 +283,7 @@ class LocalStream:
                 self._connection_state = "disconnected"
                 self._connection_error = f"{type(error).__name__}: {error}"
                 logger.warning(
-                    "Realtime session failed: attempt=%d elapsed=%.1fs error=%s",
+                    "Live session failed: attempt=%d elapsed=%.1fs error=%s",
                     attempt,
                     time.monotonic() - started_at,
                     self._connection_error,
@@ -298,7 +296,7 @@ class LocalStream:
                     reason = "requested_restart"
                 logger.log(
                     logging.WARNING if reason == "remote_close" else logging.INFO,
-                    "Realtime session ended: attempt=%d reason=%s elapsed=%.1fs",
+                    "Live session ended: attempt=%d reason=%s elapsed=%.1fs",
                     attempt,
                     reason,
                     time.monotonic() - started_at,
@@ -308,7 +306,7 @@ class LocalStream:
             conversation = self._conversation_factory(self._voice)
             if self._restart_requested.is_set():
                 continue
-            logger.info("Realtime reconnect scheduled: delay=%.1fs", RETRY_DELAY_SECONDS)
+            logger.info("Live reconnect scheduled: delay=%.1fs", RETRY_DELAY_SECONDS)
             await self._wait_for_restart(RETRY_DELAY_SECONDS)
 
     async def _wait_for_restart(self, timeout: float) -> None:
@@ -320,7 +318,7 @@ class LocalStream:
             return
 
     def launch(self) -> None:
-        """Start media and run the realtime, capture, and playback loops."""
+        """Start media and run the Live, capture, and playback loops."""
         self._stop_event.clear()
         if self._instance_path is not None:
             env_path = self._instance_path / ".env"
@@ -342,17 +340,24 @@ class LocalStream:
                 asyncio.to_thread(apply_audio_startup_config, self._robot, logger=logger),
             )
             self._tasks = [
-                asyncio.create_task(self._run_session_loop(), name="realtime-session"),
+                asyncio.create_task(self._run_session_loop(), name="live-session"),
                 asyncio.create_task(self.record_loop(), name="audio-capture"),
                 asyncio.create_task(self.play_loop(), name="audio-playback"),
                 asyncio.create_task(self._acknowledge_playback_loop(), name="audio-playback-tracking"),
             ]
             try:
-                await asyncio.gather(*self._tasks)
+                completed, _ = await asyncio.wait(self._tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in completed:
+                    await task
             except asyncio.CancelledError:
                 logger.info("Conversation tasks cancelled")
             finally:
-                await self._conversation.shutdown()
+                try:
+                    await self._conversation.shutdown()
+                finally:
+                    for task in self._tasks:
+                        task.cancel()
+                    await asyncio.gather(*self._tasks, return_exceptions=True)
 
         asyncio.run(run_streams())
 
@@ -372,9 +377,6 @@ class LocalStream:
             self._stop_event.set()
             return
         loop.call_soon_threadsafe(self._stop_event.set)
-        for task in self._tasks:
-            if not task.done():
-                loop.call_soon_threadsafe(task.cancel)
 
     def _clear_player(self) -> None:
         logger.info("Clearing robot playback: pending_acknowledgements=%d", self._playback_acknowledgements.qsize())
@@ -393,7 +395,7 @@ class LocalStream:
             logger.warning("Failed to clear robot playback: %s", error)
 
     async def record_loop(self) -> None:
-        """Forward Reachy microphone frames to the active realtime session."""
+        """Forward Reachy microphone frames to the active Live session."""
         try:
             sample_rate = self._robot.media.get_input_audio_samplerate()
         except Exception:
@@ -409,7 +411,7 @@ class LocalStream:
                 audio = self._robot.media.get_audio_sample()
             except Exception:
                 logger.exception(
-                    "Failed to read a microphone frame: sample_rate=%d Hz muted=%s realtime_connected=%s",
+                    "Failed to read a microphone frame: sample_rate=%d Hz muted=%s live_connected=%s",
                     sample_rate,
                     self._mic_muted,
                     self._conversation.connected,
@@ -425,7 +427,7 @@ class LocalStream:
                 ):
                     logger.warning(
                         "No usable microphone frames received for %.1fs "
-                        "(sample_rate=%d Hz, muted=%s, realtime_connected=%s); restarting robot media",
+                        "(sample_rate=%d Hz, muted=%s, live_connected=%s); restarting robot media",
                         missing_duration,
                         sample_rate,
                         self._mic_muted,
@@ -459,21 +461,16 @@ class LocalStream:
                 )
                 capture_started = True
             last_frame_at = now
-            if not self._mic_muted:
-                await self._conversation.receive((sample_rate, samples))
+            await self._conversation.receive((sample_rate, np.zeros_like(samples) if self._mic_muted else samples))
             await asyncio.sleep(0)
 
     async def play_loop(self) -> None:
         """Continuously queue assistant audio for robot playback."""
-        playback_item_id: str | None = None
         while not self._stop_event.is_set():
             conversation = self._conversation
             try:
                 audio = await asyncio.wait_for(conversation.emit(), timeout=0.5)
             except asyncio.TimeoutError:
-                continue
-            if audio is None:
-                self._playback_acknowledgements.put_nowait((conversation, None))
                 continue
             if audio.samples.size == 0:
                 continue
@@ -481,20 +478,17 @@ class LocalStream:
                 self._robot.media.push_audio_sample(audio.samples)
             except Exception:
                 logger.exception(
-                    "Failed to push assistant audio to the robot player: item_id=%s samples=%d",
-                    audio.item_id,
+                    "Failed to push assistant audio to the robot player: samples=%d",
                     audio.samples.size,
                 )
                 raise
-            if playback_item_id != audio.item_id:
-                logger.info("Robot audio submitted: item_id=%s samples=%d", audio.item_id, audio.samples.size)
-                playback_item_id = audio.item_id
             self._playback_acknowledgements.put_nowait((conversation, audio))
 
     async def _acknowledge_playback_loop(self) -> None:
         while True:
             conversation, audio = await self._playback_acknowledgements.get()
-            if audio is None:
+            if conversation is not self._conversation:
+                continue
+            await conversation.acknowledge_after_playback(audio)
+            if self._playback_acknowledgements.empty() and conversation.output_queue.empty():
                 conversation.acknowledge_playback_end()
-            else:
-                await conversation.acknowledge_after_playback(audio)

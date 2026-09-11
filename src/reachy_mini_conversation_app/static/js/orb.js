@@ -6,7 +6,7 @@
 import { h } from "./ui.js";
 import { GLOW_BY_STATE, ORB_STATES } from "./constants.js";
 
-/** Map a realtime activity reason to a visual state; null means keep current. */
+/** Map a Live activity reason to a visual state; null means keep current. */
 export function mapActivityToState(reason) {
   switch (reason) {
     case "listening":

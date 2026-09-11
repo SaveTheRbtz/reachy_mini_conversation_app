@@ -4,14 +4,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from agents import RunContextWrapper
 from openai import OpenAIError
 from agents.tool_context import ToolContext
 
 import reachy_mini_conversation_app.tools.manage_memory as manage_memory_module
 from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.memory import MAX_MEMORY_BYTES, MemorySnapshot, load_memory, save_memory
-from reachy_mini_conversation_app.prompts import get_session_instructions
+from reachy_mini_conversation_app.prompts import get_backend_instructions, get_session_instructions
 from reachy_mini_conversation_app.tools.manage_memory import MEMORY_MODEL, manage_memory
 
 
@@ -146,16 +145,13 @@ async def test_manage_memory_failure_preserves_snapshot(
     assert (tmp_path / "memory.json").read_bytes() == original_bytes
 
 
-def test_session_instructions_inject_shared_memory_as_untrusted_context() -> None:
-    """Inject the shared snapshot once as lower-priority untrusted context."""
+def test_backend_instructions_inject_current_memory_as_untrusted_context() -> None:
+    """Keep mutable household memory in the backend rather than immutable voice instructions."""
     dependencies = SimpleNamespace(
         memory=MemorySnapshot(memories=["Кто-то в семье любит книги о космосе."]),
     )
 
-    instructions = get_session_instructions(
-        RunContextWrapper(dependencies),
-        MagicMock(),
-    )
+    instructions = get_backend_instructions(dependencies)
 
     assert "<shared_household_memory>" in instructions
     assert '"memories"' in instructions
@@ -165,4 +161,23 @@ def test_session_instructions_inject_shared_memory_as_untrusted_context() -> Non
     assert "Do not infer who a memory describes" in instructions
     assert 'only when its result has status "updated"' in instructions
     assert "never imply success" in instructions
+    voice_instructions = get_session_instructions(())
+    assert "<shared_household_memory>" not in voice_instructions
+    assert "Кто-то в семье любит книги о космосе." not in voice_instructions
+    assert "asks what you remember" in voice_instructions
+    dependencies.memory = MemorySnapshot(memories=[])
+    assert "Кто-то в семье любит книги о космосе." not in get_backend_instructions(dependencies)
     assert "memory_id" not in instructions
+
+
+def test_live_prompt_exposes_only_enabled_backend_capabilities() -> None:
+    """A restricted profile should not promise disabled tools to the voice model."""
+    instructions = get_session_instructions(("camera", "move_head"))
+
+    assert "- camera:" in instructions
+    assert "- move_head:" in instructions
+    assert "- web_search:" not in instructions
+    assert "- manage_memory:" not in instructions
+    assert "wait_for_user" not in instructions
+    assert "Delegate before giving an answer" in instructions
+    assert "without giving the final answer" in instructions

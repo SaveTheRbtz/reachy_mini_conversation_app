@@ -2,6 +2,7 @@ import shutil
 import logging
 import zipfile
 import subprocess
+from types import SimpleNamespace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -11,6 +12,7 @@ import reachy_mini_conversation_app.prompts as prompts_mod
 import reachy_mini_conversation_app.personality as headless_mod
 import reachy_mini_conversation_app.profile_store as profile_store_mod
 from reachy_mini_conversation_app.config import DEFAULT_PROFILES_DIRECTORY, config
+from reachy_mini_conversation_app.memory import MemorySnapshot
 from reachy_mini_conversation_app.personality import (
     list_personalities,
 )
@@ -80,7 +82,7 @@ def test_prompts_load_from_compact_builtin_profile(tmp_path: Path, monkeypatch: 
     ).instructions
 
     instructions = prompts_mod.get_profile_instructions()
-    assert instructions.startswith("# Conversation")
+    assert instructions.startswith("# Personality")
     assert instructions.endswith(expected)
 
 
@@ -94,7 +96,7 @@ def test_default_session_instructions_load_from_default_profile(
     expected = read_profile_from_directory("default", DEFAULT_PROFILES_DIRECTORY / "default").instructions
 
     instructions = prompts_mod.get_profile_instructions()
-    assert instructions.startswith("# Conversation")
+    assert instructions.startswith("# Personality")
     assert instructions.endswith(expected)
 
 
@@ -105,13 +107,12 @@ def test_shared_prompt_guides_learning_without_overusing_tutoring(
     monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "mad_scientist_assistant")
     monkeypatch.setattr(config, "PROFILES_DIRECTORY", DEFAULT_PROFILES_DIRECTORY)
 
-    instructions = prompts_mod.get_profile_instructions()
+    instructions = prompts_mod.get_backend_instructions(SimpleNamespace(memory=MemorySnapshot(memories=[])))
 
     assert "Ask one leading question at a time" in instructions
     assert "without stating the final answer" in instructions
     assert "offer a smaller example, concrete analogy, or one useful hint" in instructions
     assert "Answer ordinary factual questions directly" in instructions
-    assert instructions.index("# Learning") < instructions.index("# Personality")
 
 
 def test_default_profile_is_curious_and_age_appropriate() -> None:
@@ -181,7 +182,7 @@ def test_session_voice_defaults_to_openai_voice(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", None)
     monkeypatch.delenv(config_mod.OPENAI_VOICE_ENV, raising=False)
 
-    assert prompts_mod.get_session_voice() == "marin"
+    assert prompts_mod.get_session_voice() == "gleam"
 
 
 def test_session_greeting_prompt_loads_from_selected_profile(
@@ -201,7 +202,9 @@ def test_session_greeting_prompt_loads_from_selected_profile(
     monkeypatch.setattr(config, "PROFILES_DIRECTORY", tmp_path)
     monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "friendly")
 
-    assert prompts_mod.get_session_greeting_prompt() == "Greet me like a tiny stage host."
+    assert prompts_mod.get_session_greeting_prompt() == (
+        "Speak first now, following the personality language. Greet me like a tiny stage host. Then listen."
+    )
 
 
 def test_session_greeting_prompt_uses_builtin_default_without_profile(
@@ -257,7 +260,7 @@ def test_headless_profile_write_defaults_voice_at_call_time(
         "runtime_voice_default",
         tmp_path / "user_personalities" / "runtime_voice_default",
     )
-    assert profile.voice == "marin"
+    assert profile.voice == "gleam"
 
 
 def test_headless_profile_write_uses_terminal_storage_without_instance(

@@ -1,74 +1,65 @@
+import json
 import time
 import base64
 import asyncio
 import logging
-from typing import TypeAlias
-from dataclasses import dataclass
-from collections.abc import Callable, Iterable
+from uuid import uuid4
+from typing import Final, TypeAlias
+from dataclasses import field, dataclass
+from collections.abc import Callable
 
 import soxr
 import numpy as np
+from agents import FunctionTool
+from openai import AsyncOpenAI
 from pydantic import ValidationError
 from numpy.typing import NDArray
-from agents.realtime import (
-    RealtimeAgent,
-    RealtimeAudio,
-    RealtimeError,
-    RealtimeRunner,
-    RealtimeSession,
-    RealtimeToolEnd,
-    RealtimeAudioEnd,
-    RealtimeRunConfig,
-    RealtimeToolStart,
-    RealtimeModelConfig,
-    RealtimeSessionEvent,
-    RealtimeRawModelEvent,
-    RealtimePlaybackTracker,
-    RealtimeAudioInterrupted,
-    RealtimeModelSendRawMessage,
+from agents.tool_context import ToolContext
+from openai.types.responses import (
+    ResponseCreatedEvent,
+    ResponseCompletedEvent,
+    ResponseFunctionToolCall,
+    ResponseOutputItemDoneEvent,
 )
-from openai.types.realtime import RealtimeError as OpenAIRealtimeError
-from openai.types.realtime import ResponseDoneEvent
+from openai.resources.live.live import AsyncLiveConnection
+from openai.types.live.server_event import ServerEvent
+from openai.types.live.session_config_param import SessionConfigParam
 
-from reachy_mini_conversation_app.config import (
-    REALTIME_MODEL,
-    config,
+from reachy_mini_conversation_app.config import LIVE_MODEL, DELEGATION_MODEL, config
+from reachy_mini_conversation_app.prompts import (
+    get_backend_instructions,
+    get_session_instructions,
+    get_session_greeting_prompt,
 )
-from reachy_mini_conversation_app.prompts import get_session_instructions, get_session_greeting_prompt
 from reachy_mini_conversation_app.tools.types import ToolDependencies
 from reachy_mini_conversation_app.tools.core_tools import get_function_tools, selected_tool_names
 
 
 logger = logging.getLogger(__name__)
 
-OPENAI_SAMPLE_RATE = 24_000
+OPENAI_SAMPLE_RATE: Final = 24_000
 AUDIO_WARNING_INTERVAL_SECONDS = 60.0
-REALTIME_AUDIO_SEND_STALL_SECONDS = 1.0
-CONTEXT_POST_INSTRUCTIONS_TOKENS = 64_000
-CONTEXT_RETENTION_RATIO = 0.8
+AUDIO_SEND_STALL_SECONDS = 1.0
+SESSION_TIMEOUT_SECONDS = 15.0
 AudioSamples: TypeAlias = NDArray[np.float32] | NDArray[np.int16]
 InputAudioFrame: TypeAlias = tuple[int, AudioSamples]
 ActivityObserver: TypeAlias = Callable[[str], None]
 
 
-def create_realtime_agent(
-    enabled_tool_names: Iterable[str],
-) -> RealtimeAgent[ToolDependencies]:
-    """Build the production Realtime agent for the selected tools."""
-    return RealtimeAgent[ToolDependencies](
-        name="Reachy Mini",
-        instructions=get_session_instructions,
-        tools=get_function_tools(enabled_tool_names),
-    )
-
-
 @dataclass(frozen=True)
 class PlaybackAudio:
-    """One assistant audio chunk and its playback accounting metadata."""
+    """One chunk of assistant audio at the robot's playback sample rate."""
 
-    item_id: str
-    content_index: int
     samples: NDArray[np.float32]
+
+
+@dataclass
+class BackendResponse:
+    """Function calls collected from one delegated Responses stream."""
+
+    response_id: str
+    delegation_id: str | None
+    calls: dict[str, ResponseFunctionToolCall] = field(default_factory=dict)
 
 
 class StreamingAudioBridge:
@@ -83,21 +74,18 @@ class StreamingAudioBridge:
         self._microphone_resampler: soxr.ResampleStream | None = None
         self._playback_resampler = soxr.ResampleStream(OPENAI_SAMPLE_RATE, output_sample_rate, 1)
 
-    @staticmethod
-    def _mono_float32(samples: AudioSamples) -> NDArray[np.float32]:
-        if samples.ndim == 2:
-            if samples.shape[0] < samples.shape[1]:
-                samples = samples.T
-            return np.asarray(samples.mean(axis=1), dtype=np.float32)
-        if samples.dtype == np.int16:
-            return np.asarray(samples, dtype=np.float32) / 32768.0
-        if samples.dtype == np.float32:
-            return np.asarray(samples, dtype=np.float32)
-        raise TypeError(f"Unsupported audio dtype: {samples.dtype}")
-
     def microphone_to_pcm16(self, sample_rate: int, samples: AudioSamples) -> bytes:
         """Convert one microphone frame to 24 kHz mono PCM16 bytes."""
-        mono = self._mono_float32(samples)
+        if samples.dtype == np.int16:
+            mono = np.asarray(samples, dtype=np.float32) / 32768.0
+        elif samples.dtype == np.float32:
+            mono = np.asarray(samples, dtype=np.float32)
+        else:
+            raise TypeError(f"Unsupported audio dtype: {samples.dtype}")
+        if mono.ndim == 2:
+            if mono.shape[0] < mono.shape[1]:
+                mono = mono.T
+            mono = mono.mean(axis=1)
         if self._microphone_resampler is None or self._microphone_sample_rate != sample_rate:
             self._microphone_resampler = soxr.ResampleStream(sample_rate, OPENAI_SAMPLE_RATE, 1)
             self._microphone_sample_rate = sample_rate
@@ -105,21 +93,18 @@ class StreamingAudioBridge:
         pcm16 = np.clip(converted, -1.0, 1.0) * 32767.0
         return np.asarray(pcm16, dtype="<i2").tobytes()
 
-    def pcm16_to_playback(self, pcm16: bytes, *, last: bool = False) -> NDArray[np.float32]:
-        """Resample OpenAI PCM16, flushing and resetting at the end of an audio item."""
+    def pcm16_to_playback(self, pcm16: bytes) -> NDArray[np.float32]:
+        """Resample a chunk of the continuous OpenAI PCM16 output stream."""
         samples = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
-        converted = np.asarray(self._playback_resampler.resample_chunk(samples, last=last), dtype=np.float32)
-        if last:
-            self._playback_resampler.clear()
-        return converted
+        return np.asarray(self._playback_resampler.resample_chunk(samples), dtype=np.float32)
 
     def reset_playback(self) -> None:
         """Discard output-side resampling history after interruption."""
         self._playback_resampler.clear()
 
 
-class RealtimeConversation:
-    """Run one OpenAI Realtime conversation for Reachy Mini."""
+class LiveConversation:
+    """Run a GPT-Live voice session with a delegated Responses tool backend."""
 
     def __init__(
         self,
@@ -128,27 +113,34 @@ class RealtimeConversation:
         voice: str,
         output_sample_rate: int,
     ) -> None:
-        """Initialize the session-independent conversation state."""
+        """Initialize conversation, tool execution, and continuous audio state."""
         self.dependencies = dependencies
         self.voice = voice
-        self.output_queue: asyncio.Queue[PlaybackAudio | None] = asyncio.Queue()
+        self.output_queue: asyncio.Queue[PlaybackAudio] = asyncio.Queue()
         self.last_activity_time = time.monotonic()
-        self._session: RealtimeSession | None = None
+        self.usage_seconds = 0.0
+        self._connection: AsyncLiveConnection | None = None
+        self._transport: AsyncLiveConnection | None = None
+        self._closed = asyncio.Event()
+        self._closing = False
         self._activity_observer: ActivityObserver | None = None
         self._clear_player: Callable[[], None] | None = None
         self._bridge = StreamingAudioBridge(output_sample_rate)
-        self._playback_tracker = RealtimePlaybackTracker()
         self._playback_interrupted = asyncio.Event()
+        self._backend_busy = False
+        self._pending_input = False
+        self._tools: dict[str, FunctionTool] = {}
+        self._responses: dict[str | None, BackendResponse] = {}
+        self._tool_batches: asyncio.Queue[BackendResponse] = asyncio.Queue()
+        self._handled_call_ids: set[str] = set()
+        self._backend_commands: set[str] = set()
         self._microphone_forwarding_started = False
-        self._assistant_audio_item: tuple[str, int] | None = None
-        self._response_started_at: dict[str, float] = {}
-        self._tool_started_at: float | None = None
         self._last_audio_send_warning_at = float("-inf")
 
     @property
     def connected(self) -> bool:
-        """Return whether a realtime session is active."""
-        return self._session is not None
+        """Return whether the Live session is ready for application commands."""
+        return self._connection is not None and not self._closing
 
     def set_activity_observer(self, observer: ActivityObserver | None) -> None:
         """Attach an observer for coarse conversation state changes."""
@@ -164,343 +156,367 @@ class RealtimeConversation:
             self._activity_observer(reason)
 
     async def start_up(self) -> None:
-        """Connect and process events until the session closes."""
+        """Connect and receive Live events until the session finalizes."""
+        if self._closing:
+            return
         api_key = (config.OPENAI_API_KEY or "").strip()
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not configured")
-
-        enabled_tool_names = selected_tool_names(
+        enabled_names = selected_tool_names(
             str(self.dependencies.instance_path) if self.dependencies.instance_path is not None else None
         )
-        logger.info(
-            "Realtime configuration: model=%s voice=%s tools=%s context_tokens=%d retention_ratio=%.2f",
-            REALTIME_MODEL,
-            self.voice,
-            ",".join(enabled_tool_names),
-            CONTEXT_POST_INSTRUCTIONS_TOKENS,
-            CONTEXT_RETENTION_RATIO,
-        )
-        agent = create_realtime_agent(enabled_tool_names)
-        run_config: RealtimeRunConfig = {
-            "tracing_disabled": True,
-            "async_tool_calls": False,
-            "model_settings": {
-                "reasoning": {"effort": "low"},
+        self._tools = {tool.name: tool for tool in get_function_tools(enabled_names)}
+        session: SessionConfigParam = {
+            "model": LIVE_MODEL,
+            "instructions": get_session_instructions(enabled_names),
+            "audio": {
+                "format": {"type": "audio/pcm", "rate": OPENAI_SAMPLE_RATE},
+                "output": {"voice": self.voice},
             },
-        }
-        model_config: RealtimeModelConfig = {
-            "api_key": api_key,
-            "playback_tracker": self._playback_tracker,
-            "initial_model_settings": {
-                "model_name": REALTIME_MODEL,
-                "output_modalities": ["audio"],
-                "parallel_tool_calls": False,
-                "audio": {
-                    "input": {
-                        "format": "pcm16",
-                        "noise_reduction": {"type": "near_field"},
-                        "turn_detection": {
-                            "type": "semantic_vad",
-                            "create_response": True,
-                            "interrupt_response": True,
-                            "eagerness": "auto",
-                        },
-                    },
-                    "output": {"format": "pcm16", "voice": self.voice},
+            "delegation": {
+                "type": "responses",
+                "responses": {
+                    "model": DELEGATION_MODEL,
+                    "reasoning": {"effort": "low"},
+                    "instructions": get_backend_instructions(self.dependencies),
+                    "parallel_tool_calls": False,
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.params_json_schema,
+                            "strict": tool.strict_json_schema,
+                        }
+                        for tool in self._tools.values()
+                    ],
                 },
             },
         }
-        runner = RealtimeRunner(agent, config=run_config)
-        async with await runner.run(context=self.dependencies, model_config=model_config) as session:
-            await session.model.send_event(
-                RealtimeModelSendRawMessage(
-                    message={
-                        "type": "session.update",
-                        "other_data": {
-                            "session": {
-                                "type": "realtime",
-                                "truncation": {
-                                    "type": "retention_ratio",
-                                    "retention_ratio": CONTEXT_RETENTION_RATIO,
-                                    "token_limits": {
-                                        "post_instructions": CONTEXT_POST_INSTRUCTIONS_TOKENS,
-                                    },
-                                },
-                            },
-                        },
-                    }
-                )
-            )
-            self._session = session
-            self.dependencies.send_image = self._send_image
-            self._mark_activity("connected")
-            try:
-                await session.send_message(get_session_greeting_prompt())
-                async for event in session:
-                    await self._handle_event(event)
-            finally:
-                self._clear_playback()
-                self._response_started_at.clear()
-                self._tool_started_at = None
-                self.dependencies.send_image = None
-                self.dependencies.movement_manager.set_listening(False)
-                self.dependencies.movement_manager.set_speaking(False)
-                self._session = None
-                self._mark_activity("disconnected")
+        logger.info(
+            "Live configuration: model=%s backend=%s voice=%s tools=%s",
+            LIVE_MODEL,
+            DELEGATION_MODEL,
+            self.voice,
+            ",".join(enabled_names),
+        )
+        async with AsyncOpenAI(api_key=api_key) as client:
+            # LocalStream owns reconnects; a new transport needs a fresh Live session.
+            async with client.live.connect(max_retries=0) as connection:
+                self._transport = connection
+                try:
+                    if self._closing:
+                        return
+                    await connection.session.start(session=session)
+                    async with asyncio.timeout(SESSION_TIMEOUT_SECONDS):
+                        while self._connection is None:
+                            event = await connection.recv()
+                            if event.type == "session.started":
+                                self._connection = connection
+                                logger.info("Live session started: session_id=%s", event.session.id)
+                                self.dependencies.movement_manager.set_listening(True)
+                                self._mark_activity("connected")
+                            elif event.type == "error":
+                                raise RuntimeError(
+                                    f"Live startup failed: type={event.error.type} code={event.error.code}"
+                                )
+                            elif event.type == "session.closed":
+                                await self._handle_event(event)
+                                raise RuntimeError("Live session closed before startup")
+                    await connection.session.instructions.append(
+                        event_id="greeting",
+                        delegation_id=None,
+                        content=get_session_greeting_prompt(),
+                    )
+                    async with asyncio.TaskGroup() as tasks:
+                        tool_worker = tasks.create_task(self._run_tools())
+                        try:
+                            async for event in connection:
+                                await self._handle_event(event)
+                                if self._closed.is_set():
+                                    break
+                            if not self._closed.is_set():
+                                raise RuntimeError("Live connection closed without final session usage")
+                        finally:
+                            tool_worker.cancel()
+                finally:
+                    if self._connection is not None and not self._closed.is_set():
+                        logger.warning(
+                            "Live transport ended without finalization; final usage is unconfirmed: seconds=%.3f",
+                            self.usage_seconds,
+                        )
+                    self._closing = True
+                    self._backend_busy = False
+                    self._pending_input = False
+                    self._backend_commands.clear()
+                    self._clear_playback()
+                    self.dependencies.movement_manager.set_listening(False)
+                    self.dependencies.movement_manager.set_speaking(False)
+                    self._connection = None
+                    self._transport = None
+                    self._mark_activity("disconnected")
 
     async def shutdown(self) -> None:
-        """Close the active session."""
-        session = self._session
-        if session is not None:
-            await session.close()
+        """Request finalization and keep receiving until final usage arrives."""
+        connection = self._connection
+        if connection is None:
+            self._closing = True
+            if self._transport is not None:
+                await self._transport.close()
+            return
+        if self._closed.is_set():
+            return
+        if not self._closing:
+            self._closing = True
+            await connection.session.close()
+        try:
+            await asyncio.wait_for(self._closed.wait(), timeout=SESSION_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning("Live finalization timed out; final usage is unconfirmed")
+            await connection.close()
 
     async def receive(self, frame: InputAudioFrame) -> None:
-        """Send one Reachy microphone frame to OpenAI."""
-        session = self._session
-        if session is None:
+        """Forward continuous microphone audio, including silence, to Live."""
+        connection = self._connection
+        if connection is None or self._closing:
             return
         sample_rate, samples = frame
         pcm16 = self._bridge.microphone_to_pcm16(sample_rate, samples)
-        if pcm16:
-            send_started_at = time.monotonic()
-            try:
-                await session.send_audio(pcm16)
-            except Exception:
-                logger.exception(
-                    "Failed to forward microphone audio to OpenAI Realtime: input_rate=%d Hz pcm16_bytes=%d",
-                    sample_rate,
-                    len(pcm16),
-                )
-                raise
-            send_finished_at = time.monotonic()
-            if not self._microphone_forwarding_started:
-                logger.info(
-                    "Realtime microphone forwarding started: input_rate=%d Hz pcm16_bytes=%d",
-                    sample_rate,
-                    len(pcm16),
-                )
-                self._microphone_forwarding_started = True
-            send_duration = send_finished_at - send_started_at
-            if (
-                send_duration >= REALTIME_AUDIO_SEND_STALL_SECONDS
-                and send_finished_at - self._last_audio_send_warning_at >= AUDIO_WARNING_INTERVAL_SECONDS
-            ):
-                logger.warning(
-                    "Realtime microphone forwarding delayed: send_duration=%.3fs pcm16_bytes=%d",
-                    send_duration,
-                    len(pcm16),
-                )
-                self._last_audio_send_warning_at = send_finished_at
+        if not pcm16:
+            return
+        started_at = time.monotonic()
+        await connection.session.input_audio.append(audio=base64.b64encode(pcm16).decode("ascii"))
+        finished_at = time.monotonic()
+        if not self._microphone_forwarding_started:
+            logger.info("Live microphone forwarding started: input_rate=%d Hz pcm16_bytes=%d", sample_rate, len(pcm16))
+            self._microphone_forwarding_started = True
+        if (
+            finished_at - started_at >= AUDIO_SEND_STALL_SECONDS
+            and finished_at - self._last_audio_send_warning_at >= AUDIO_WARNING_INTERVAL_SECONDS
+        ):
+            logger.warning(
+                "Live microphone forwarding delayed: send_duration=%.3fs pcm16_bytes=%d",
+                finished_at - started_at,
+                len(pcm16),
+            )
+            self._last_audio_send_warning_at = finished_at
 
-    async def emit(self) -> PlaybackAudio | None:
-        """Wait for the next assistant audio chunk or end marker."""
+    async def emit(self) -> PlaybackAudio:
+        """Wait for the next chunk of assistant audio."""
         return await self.output_queue.get()
 
     async def say(self, text: str) -> None:
-        """Send a text turn to the active realtime session."""
-        session = self._session
-        if session is None:
-            raise RuntimeError("No active realtime session")
-        await session.send_message(text)
+        """Submit typed user input to the delegated backend."""
+        connection = self._connection
+        if connection is None or self._closing:
+            raise RuntimeError("No active Live session")
+        event_id = str(uuid4())
+        self._backend_commands.add(event_id)
+        await connection.response.item.create(
+            event_id=event_id,
+            item={
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            },
+        )
+        event_id = str(uuid4())
+        self._backend_commands.add(event_id)
+        await connection.session.instructions.append(
+            event_id=event_id,
+            delegation_id=None,
+            content=(
+                "The user has sent a typed request to the backend. "
+                "Answer that request aloud when its result arrives, then listen."
+            ),
+        )
+        # A pending tool batch must supply every result before any continuation.
+        if self._backend_busy:
+            self._pending_input = True
+        else:
+            self._backend_busy = True
+            event_id = str(uuid4())
+            self._backend_commands.add(event_id)
+            await connection.response.create(event_id=event_id)
+        self._mark_activity("thinking")
 
     async def interrupt(self) -> None:
-        """Interrupt the response and clear pending playback."""
-        session = self._session
-        if session is None:
-            self._clear_playback()
-            return
-        try:
-            await session.interrupt()
-        finally:
-            self._clear_playback()
+        """Clear local playback and ask Live to stop speaking and listen."""
+        self._clear_playback()
+        connection = self._connection
+        if connection is not None and not self._closing:
+            await connection.session.instructions.append(
+                event_id=str(uuid4()),
+                delegation_id=None,
+                content="Stop speaking now and listen. Wait for the user's next request.",
+            )
+        self.acknowledge_playback_end()
 
     async def acknowledge_after_playback(self, audio: PlaybackAudio) -> None:
-        """Track one chunk across its estimated robot playback duration."""
-        self.dependencies.movement_manager.set_listening(False)
+        """Track a queued chunk for its estimated robot playback duration."""
         self.dependencies.movement_manager.set_speaking(True)
         self._mark_activity("speaking")
         duration = audio.samples.size / self._bridge.output_sample_rate
         try:
             await asyncio.wait_for(self._playback_interrupted.wait(), timeout=duration)
-        except asyncio.TimeoutError:
-            self._playback_tracker.on_play_ms(audio.item_id, audio.content_index, duration * 1000)
+        except TimeoutError:
+            return
 
     def acknowledge_playback_end(self) -> None:
-        """Mark listening only after all queued assistant audio has played."""
+        """Mark listening when the local playback queue has drained."""
         self.dependencies.movement_manager.set_speaking(False)
         self.dependencies.movement_manager.set_listening(True)
         self._mark_activity("listening")
 
-    async def _handle_event(self, event: RealtimeSessionEvent) -> None:
-        if isinstance(event, RealtimeAudio):
+    async def _handle_event(self, event: ServerEvent) -> None:
+        if event.type == "session.output_audio.delta":
+            if self._closing:
+                return
             self._playback_interrupted.clear()
-            playback_samples = self._bridge.pcm16_to_playback(event.audio.data)
-            if playback_samples.size:
-                self.output_queue.put_nowait(
-                    PlaybackAudio(
-                        item_id=event.item_id,
-                        content_index=event.content_index,
-                        samples=playback_samples,
-                    )
-                )
-            audio_item = (event.item_id, event.content_index)
-            if self._assistant_audio_item != audio_item:
-                response_started_at = self._response_started_at.get(event.audio.response_id)
-                logger.info(
-                    "Realtime assistant audio received: response_id=%s item_id=%s elapsed_since_response_ms=%s "
-                    "pcm16_bytes=%d playback_samples=%d",
-                    event.audio.response_id,
-                    event.item_id,
-                    round((time.monotonic() - response_started_at) * 1000)
-                    if response_started_at is not None
-                    else None,
-                    len(event.audio.data),
-                    playback_samples.size,
-                )
-                self._assistant_audio_item = audio_item
-        elif isinstance(event, RealtimeAudioInterrupted):
-            logger.info(
-                "Realtime audio interrupted: item_id=%s pending_output_chunks=%d",
-                event.item_id,
-                self.output_queue.qsize(),
-            )
-            self.dependencies.movement_manager.set_speaking(False)
-            self.dependencies.movement_manager.set_listening(True)
-            self._clear_playback()
+            samples = self._bridge.pcm16_to_playback(base64.b64decode(event.delta))
+            if samples.size:
+                self.output_queue.put_nowait(PlaybackAudio(samples))
+        elif event.type == "session.input_transcript.delta":
             self._mark_activity("listening")
-        elif isinstance(event, RealtimeRawModelEvent):
-            if event.data.type == "connection_status":
-                logger.info("Realtime transport: status=%s", event.data.status)
-            elif event.data.type == "turn_started":
-                if event.data.response_id is not None:
-                    self._response_started_at[event.data.response_id] = time.monotonic()
-                logger.info("Realtime response started: response_id=%s", event.data.response_id)
-            elif event.data.type == "raw_server_event":
-                raw_server_event: object = event.data.data
-                if not isinstance(raw_server_event, dict):
-                    return
-                event_type: object = raw_server_event.get("type")
-                if event_type in ("input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped"):
-                    logger.info("Realtime VAD: event=%s item_id=%s", event_type, raw_server_event.get("item_id"))
-                    self._mark_activity(
-                        "listening" if event_type == "input_audio_buffer.speech_started" else "thinking"
+        elif event.type == "session.delegation.created":
+            self._mark_activity("thinking")
+        elif event.type == "response.event":
+            nested_type = event.event.get("type")
+            try:
+                if nested_type == "response.created":
+                    response = ResponseCreatedEvent.model_validate(event.event).response
+                    self._backend_busy = True
+                    self._responses[event.delegation_id] = BackendResponse(response.id, event.delegation_id)
+                    logger.info(
+                        "Live backend started: response_id=%s delegation_id=%s", response.id, event.delegation_id
                     )
-                elif event_type == "session.created":
-                    session_metadata: object = raw_server_event.get("session")
-                    if isinstance(session_metadata, dict):
-                        logger.info("Realtime session created: session_id=%s", session_metadata.get("id"))
-                elif event_type == "response.done":
-                    try:
-                        response = ResponseDoneEvent.model_validate(raw_server_event).response
-                    except ValidationError as error:
-                        logger.warning(
-                            "Cannot read Realtime response.done diagnostics: errors=%s",
-                            error.errors(include_input=False, include_context=False, include_url=False),
-                        )
-                        return
-                    response_started_at = self._response_started_at.pop(response.id, None) if response.id else None
-                    details = response.status_details
-                    response_error = details.error if details else None
+                elif nested_type == "response.output_item.done":
+                    item = ResponseOutputItemDoneEvent.model_validate(event.event).item
+                    if item.type == "function_call":
+                        batch = self._responses.get(event.delegation_id)
+                        if batch is None:
+                            raise RuntimeError("Live function call arrived without a backend response")
+                        batch.calls[item.call_id] = item
+                elif nested_type == "response.completed":
+                    response = ResponseCompletedEvent.model_validate(event.event).response
+                    batch = self._responses.pop(event.delegation_id, None)
                     usage = response.usage
-                    input_details = usage.input_token_details if usage else None
-                    logger.log(
-                        logging.WARNING if response.status in ("failed", "incomplete") else logging.INFO,
-                        "Realtime response finished: response_id=%s status=%s duration_ms=%s reason=%s "
-                        "error_code=%s error_type=%s input_tokens=%s cached_tokens=%s output_tokens=%s",
+                    logger.info(
+                        "Live backend finished: response_id=%s input_tokens=%s output_tokens=%s",
                         response.id,
-                        response.status,
-                        round((time.monotonic() - response_started_at) * 1000)
-                        if response_started_at is not None
-                        else None,
-                        details.reason if details else None,
-                        response_error.code if response_error else None,
-                        response_error.type if response_error else None,
                         usage.input_tokens if usage else None,
-                        input_details.cached_tokens if input_details else None,
                         usage.output_tokens if usage else None,
                     )
-        elif isinstance(event, RealtimeAudioEnd):
-            if self._assistant_audio_item == (event.item_id, event.content_index):
-                playback_samples = self._bridge.pcm16_to_playback(b"", last=True)
-                if playback_samples.size:
-                    self.output_queue.put_nowait(PlaybackAudio(event.item_id, event.content_index, playback_samples))
-                self._assistant_audio_item = None
-                self.output_queue.put_nowait(None)
-        elif isinstance(event, RealtimeToolStart):
-            self._tool_started_at = time.monotonic()
-            logger.info("Tool started: %s", event.tool.name)
-            self._mark_activity("thinking")
-        elif isinstance(event, RealtimeToolEnd):
-            output: object = event.output
-            failed = isinstance(output, dict) and "error" in output
-            logger.log(
-                logging.WARNING if failed else logging.INFO,
-                "Tool finished: %s outcome=%s duration_ms=%s error=%s",
-                event.tool.name,
-                "error" if failed else "returned",
-                round((time.monotonic() - self._tool_started_at) * 1000)
-                if self._tool_started_at is not None
-                else None,
-                output.get("error") if isinstance(output, dict) else None,
+                    if batch is not None and not self._closing:
+                        self._tool_batches.put_nowait(batch)
+                elif nested_type in {"response.failed", "response.incomplete", "response.cancelled", "error"}:
+                    self._responses.pop(event.delegation_id, None)
+                    self._backend_busy = False
+                    logger.error("Live backend failed: event=%s delegation_id=%s", nested_type, event.delegation_id)
+            except ValidationError as error:
+                logger.error(
+                    "Invalid Live backend event: type=%s errors=%s",
+                    nested_type,
+                    error.errors(include_input=False, include_context=False, include_url=False),
+                )
+                raise RuntimeError("Invalid Live backend event") from None
+        elif event.type == "session.usage.updated":
+            self.usage_seconds = event.usage.seconds
+        elif event.type == "session.closed":
+            self.usage_seconds = event.usage.seconds
+            self._closing = True
+            self._closed.set()
+            logger.info("Live session closed: reason=%s seconds=%.3f", event.reason, self.usage_seconds)
+        elif event.type == "error":
+            logger.error(
+                "Live error: type=%s code=%s command=%s",
+                event.error.type,
+                event.error.code,
+                event.error.client_event_id,
             )
-            self._tool_started_at = None
-            self._mark_activity("thinking")
-        elif isinstance(event, RealtimeError):
-            session_error: object = event.error
-            match session_error:
-                case OpenAIRealtimeError():
-                    logger.error(
-                        "Realtime session error: type=%s code=%s param=%s event_id=%s",
-                        session_error.type,
-                        session_error.code,
-                        session_error.param,
-                        session_error.event_id,
+            if event.error.client_event_id in self._backend_commands:
+                self._closing = True
+                raise RuntimeError("Live backend command rejected")
+
+    async def _run_tools(self) -> None:
+        while True:
+            batch = await self._tool_batches.get()
+            try:
+                connection = self._connection
+                if connection is None or self._closing:
+                    continue
+                for call in batch.calls.values():
+                    if call.call_id in self._handled_call_ids:
+                        continue
+                    self._handled_call_ids.add(call.call_id)
+                    tool = self._tools.get(call.name)
+                    started_at = time.monotonic()
+                    logger.info(
+                        "Tool started: %s call_id=%s delegation_id=%s response_id=%s",
+                        call.name,
+                        call.call_id,
+                        batch.delegation_id,
+                        batch.response_id,
                     )
-                case ValidationError():
-                    logger.error(
-                        "Realtime validation error: errors=%s",
-                        session_error.errors(include_input=False, include_context=False, include_url=False),
+                    self._mark_activity("thinking")
+                    output: object
+                    if tool is None:
+                        logger.warning("Rejected unavailable tool: %s", call.name)
+                        output = {"error": f"Tool is unavailable: {call.name}"}
+                    else:
+                        context = ToolContext(
+                            context=self.dependencies,
+                            tool_name=call.name,
+                            tool_call_id=call.call_id,
+                            tool_arguments=call.arguments,
+                        )
+                        try:
+                            output = await tool.on_invoke_tool(context, call.arguments)
+                        except Exception as error:
+                            logger.exception("Tool failed: %s", call.name)
+                            output = {"error": f"{call.name} failed: {type(error).__name__}: {error}"}
+                    logger.info(
+                        "Tool finished: %s duration_ms=%d", call.name, round((time.monotonic() - started_at) * 1000)
                     )
-                case {"message": str(message)}:
-                    logger.error("Realtime SDK error: %s", message)
-                case Exception():
-                    logger.error(
-                        "Realtime session error: type=%s message=%s", type(session_error).__name__, session_error
+                    if self._closing:
+                        return
+                    event_id = str(uuid4())
+                    self._backend_commands.add(event_id)
+                    await connection.response.item.create(
+                        event_id=event_id,
+                        item={
+                            "type": "function_call_output",
+                            "call_id": call.call_id,
+                            "output": output if isinstance(output, str) else json.dumps(output),
+                        },
                     )
-                case _:
-                    logger.error("Realtime session error: unexpected_error_type=%s", type(session_error).__name__)
+                if not batch.calls and not self._pending_input:
+                    self._backend_busy = False
+                    continue
+                self._pending_input = False
+                event_id = str(uuid4())
+                self._backend_commands.add(event_id)
+                await connection.session.update(
+                    event_id=event_id,
+                    session={
+                        "delegation": {
+                            "type": "responses",
+                            "responses": {
+                                "instructions": get_backend_instructions(self.dependencies),
+                            },
+                        },
+                    },
+                )
+                event_id = str(uuid4())
+                self._backend_commands.add(event_id)
+                await connection.response.create(event_id=event_id)
+            finally:
+                self._tool_batches.task_done()
 
     def _clear_playback(self) -> None:
         self._playback_interrupted.set()
         self._bridge.reset_playback()
-        self._assistant_audio_item = None
         while not self.output_queue.empty():
-            try:
-                self.output_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+            self.output_queue.get_nowait()
         if self._clear_player is not None:
             self._clear_player()
-
-    async def _send_image(self, question: str, jpeg_bytes: bytes) -> None:
-        session = self._session
-        if session is None:
-            raise RuntimeError("No active realtime session")
-        image_url = f"data:image/jpeg;base64,{base64.b64encode(jpeg_bytes).decode('ascii')}"
-        await session.model.send_event(
-            RealtimeModelSendRawMessage(
-                message={
-                    "type": "conversation.item.create",
-                    "other_data": {
-                        "item": {
-                            "type": "message",
-                            "role": "user",
-                            "content": [
-                                {"type": "input_text", "text": question},
-                                {"type": "input_image", "image_url": image_url},
-                            ],
-                        }
-                    },
-                }
-            )
-        )

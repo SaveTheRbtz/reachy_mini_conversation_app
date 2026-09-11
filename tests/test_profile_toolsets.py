@@ -30,7 +30,7 @@ def configured_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
         "guide",
         profiles_root / "guide",
         "Guide profile.",
-        ["camera", TOOL_NAME, "wait_for_user"],
+        ["camera", TOOL_NAME, "move_head"],
     )
     monkeypatch.setattr(config, "INSTANCE_PATH", instance_path)
     monkeypatch.setattr(config, "PROFILES_DIRECTORY", profiles_root)
@@ -41,18 +41,18 @@ def configured_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 def test_profile_tool_override_round_trip_and_reset(configured_profiles: Path) -> None:
     """An explicit override should replace authored defaults until it is reset."""
     instance_path = configured_profiles
-    assert read_profile_tool_names("guide", instance_path) == ["camera", TOOL_NAME, "wait_for_user"]
+    assert read_profile_tool_names("guide", instance_path) == ["camera", TOOL_NAME, "move_head"]
     assert read_profile_tool_override("guide", instance_path) is None
 
     settings_path = write_profile_tool_override(
         "guide",
-        [" camera ", "# disabled", "", "camera", "wait_for_user"],
+        [" camera ", "# disabled", "", "camera", "move_head"],
         instance_path,
     )
 
     assert settings_path == get_profile_toolsets_path(instance_path)
-    assert read_profile_tool_override("guide", instance_path) == ["camera", "wait_for_user"]
-    assert read_profile_tool_names("guide", instance_path) == ["camera", "wait_for_user"]
+    assert read_profile_tool_override("guide", instance_path) == ["camera", "move_head"]
+    assert read_profile_tool_names("guide", instance_path) == ["camera", "move_head"]
 
     write_profile_tool_override("guide", [], instance_path)
 
@@ -60,7 +60,7 @@ def test_profile_tool_override_round_trip_and_reset(configured_profiles: Path) -
     assert read_profile_tool_names("guide", instance_path) == []
     assert clear_profile_tool_override("guide", instance_path) is True
     assert read_profile_tool_override("guide", instance_path) is None
-    assert read_profile_tool_names("guide", instance_path) == ["camera", TOOL_NAME, "wait_for_user"]
+    assert read_profile_tool_names("guide", instance_path) == ["camera", TOOL_NAME, "move_head"]
     assert not settings_path.exists()
     assert clear_profile_tool_override("guide", instance_path) is False
 

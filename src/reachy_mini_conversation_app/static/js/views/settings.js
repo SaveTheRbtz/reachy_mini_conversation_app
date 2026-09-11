@@ -1,4 +1,4 @@
-/** Settings view for the OpenAI Realtime connection and voice. */
+/** Settings view for the OpenAI Live connection and voice. */
 
 import {
   applyVoice,
@@ -26,7 +26,7 @@ export async function mountSettingsView({ outlet, signal }) {
         "header",
         { class: "view-header" },
         h("h1", { class: "view-title" }, "Settings"),
-        h("p", { class: "view-subtitle" }, "OpenAI Realtime connection, voice, and session state.")
+        h("p", { class: "view-subtitle" }, "OpenAI Live connection, voice, and session state.")
       ),
       connectionSection.element,
       voiceSection.element,
@@ -85,7 +85,7 @@ function buildConnectionSection({ onSaved } = {}) {
     try {
       await saveOpenAIConfig(apiKey.value);
       apiKey.value = "";
-      status.textContent = "Saved. The Realtime session is reconnecting.";
+      status.textContent = "Saved. The Live session is reconnecting.";
       await onSaved?.();
     } catch (error) {
       status.textContent = `Failed to save: ${describeError(error)}`;
@@ -176,7 +176,7 @@ function buildVoiceSection() {
 }
 
 function buildStatusSection() {
-  const list = h("dl", { class: "settings-status-grid" }, statusRow("Realtime", "Loading…"));
+  const list = h("dl", { class: "settings-status-grid" }, statusRow("Live", "Loading…"));
   const element = h(
     "section",
     { class: "settings-section" },
@@ -199,14 +199,14 @@ function buildStatusSection() {
         statusRow("API key", payload.has_key ? "Configured" : "Missing", payload.has_key ? "ok" : "warn"),
         statusRow("Model", payload.model || "-"),
         statusRow("Voice", payload.voice || "-"),
-        statusRow("Realtime", labels[state] || "Unavailable", state === "connected" ? "ok" : "warn")
+        statusRow("Live", labels[state] || "Unavailable", state === "connected" ? "ok" : "warn")
       );
       if (payload.connection_error) {
         list.appendChild(statusRow("Connection error", payload.connection_error, "warn"));
       }
     },
     renderUnavailable(error) {
-      list.replaceChildren(statusRow("Realtime", `Unavailable: ${describeError(error)}`, "warn"));
+      list.replaceChildren(statusRow("Live", `Unavailable: ${describeError(error)}`, "warn"));
     },
   };
 }

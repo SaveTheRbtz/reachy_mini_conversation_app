@@ -18,7 +18,7 @@ from reachy_mini_conversation_app import app_lifecycle
 from reachy_mini_conversation_app.moves import MovementManager
 from reachy_mini_conversation_app.utils import parse_args, setup_logger, log_connection_troubleshooting
 from reachy_mini_conversation_app.config import (
-    REALTIME_MODEL,
+    LIVE_MODEL,
     config,
     get_default_voice,
     set_instance_path,
@@ -28,7 +28,7 @@ from reachy_mini_conversation_app.config import (
 from reachy_mini_conversation_app.memory import load_memory
 from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.prompts import get_session_voice
-from reachy_mini_conversation_app.realtime import RealtimeConversation
+from reachy_mini_conversation_app.realtime import LiveConversation
 from reachy_mini_conversation_app.tools.types import ToolResult, ToolDependencies
 from reachy_mini_conversation_app.startup_settings import (
     StartupSettings,
@@ -81,9 +81,9 @@ def run(
     settings_app: FastAPI | None = None,
     instance_path: str | Path | None = None,
 ) -> None:
-    """Run the OpenAI Realtime conversation app."""
+    """Run the OpenAI Live conversation app."""
     logger = setup_logger(args.debug)
-    logger.info("Starting Reachy Mini Conversation App with %s", REALTIME_MODEL)
+    logger.info("Starting Reachy Mini Conversation App with %s", LIVE_MODEL)
     logger.info(
         "Runtime versions: openai=%s openai-agents=%s reachy-mini=%s",
         version("openai"),
@@ -134,8 +134,8 @@ def run(
         output_sample_rate,
     )
 
-    def build_conversation(voice: str) -> RealtimeConversation:
-        return RealtimeConversation(
+    def build_conversation(voice: str) -> LiveConversation:
+        return LiveConversation(
             dependencies,
             voice=voice,
             output_sample_rate=output_sample_rate,
