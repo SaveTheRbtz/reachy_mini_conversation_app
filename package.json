@@ -3,13 +3,22 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc",
-    "check": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "build": "node --experimental-strip-types frontend/build.ts",
+    "check": "buf lint && tsc --noEmit && tsc -p tsconfig.test.json",
     "check:generated": "node --experimental-strip-types frontend/check-generated.ts",
-    "test": "npm run check && npm run build && node --experimental-strip-types --test frontend/tests/*.test.ts"
+    "test": "npm run check && npm run build && node --experimental-strip-types --test frontend/tests/*.test.ts",
+    "generate": "buf generate"
   },
   "devDependencies": {
+    "@bufbuild/buf": "1.72.0",
+    "@bufbuild/protoc-gen-es": "2.15.0",
     "@types/node": "22.20.2",
+    "esbuild": "0.28.2",
     "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.15.0",
+    "@connectrpc/connect": "2.2.0",
+    "@connectrpc/connect-web": "2.2.0"
   }
 }

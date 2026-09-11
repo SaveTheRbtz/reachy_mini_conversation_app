@@ -1,0 +1,253 @@
+syntax = "proto3";
+
+package reachy.conversation.v1;
+
+import "google/api/field_behavior.proto";
+import "google/api/resource.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/field_mask.proto";
+
+// Controls the conversation belonging to this app instance.
+service ConversationService {
+  rpc GetConversation(GetConversationRequest) returns (Conversation) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc UpdateConversation(UpdateConversationRequest) returns (Conversation);
+  // Sends a current snapshot first, then snapshots whenever state changes.
+  rpc WatchConversation(WatchConversationRequest) returns (stream Conversation);
+  // Accepts a local restart; connection progress is observed through WatchConversation.
+  rpc RestartConversation(RestartConversationRequest) returns (Conversation);
+  rpc SendConversationText(SendConversationTextRequest) returns (SendConversationTextResponse);
+  rpc InterruptConversation(InterruptConversationRequest) returns (InterruptConversationResponse);
+  rpc GetSettings(GetSettingsRequest) returns (Settings) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc UpdateSettings(UpdateSettingsRequest) returns (Settings);
+  // Stores the credential without returning it; restart separately to apply it.
+  rpc SetSettingsApiKey(SetSettingsApiKeyRequest) returns (Settings);
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (Capabilities) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc ListProfiles(ListProfilesRequest) returns (ListProfilesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc GetProfile(GetProfileRequest) returns (Profile) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc CreateProfile(CreateProfileRequest) returns (Profile);
+  // Saves configuration; restart separately to reload an active profile.
+  rpc UpdateProfile(UpdateProfileRequest) returns (Profile);
+  rpc DeleteProfile(DeleteProfileRequest) returns (google.protobuf.Empty);
+}
+
+message Conversation {
+  option (google.api.resource) = {
+    type: "conversation.reachy-mini.local/Conversation"
+    pattern: "conversation"
+    singular: "conversation"
+    plural: "conversations"
+  };
+
+  enum ConnectionState {
+    CONNECTION_STATE_UNSPECIFIED = 0;
+    CONNECTION_STATE_NOT_STARTED = 1;
+    CONNECTION_STATE_WAITING_FOR_CONFIG = 2;
+    CONNECTION_STATE_CONNECTING = 3;
+    CONNECTION_STATE_CONNECTED = 4;
+    CONNECTION_STATE_DISCONNECTED = 5;
+  }
+
+  string name = 1 [(google.api.field_behavior) = IDENTIFIER];
+  bool muted = 2 [(google.api.field_behavior) = OPTIONAL];
+  string profile = 3 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Profile"
+  ];
+  string voice = 4 [(google.api.field_behavior) = OUTPUT_ONLY];
+  string model = 5 [(google.api.field_behavior) = OUTPUT_ONLY];
+  ConnectionState connection_state = 6 [(google.api.field_behavior) = OUTPUT_ONLY];
+  string connection_error = 7 [(google.api.field_behavior) = OUTPUT_ONLY];
+  bool playing = 8 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+message Settings {
+  option (google.api.resource) = {
+    type: "conversation.reachy-mini.local/Settings"
+    pattern: "settings"
+    singular: "settings"
+    plural: "settings"
+  };
+
+  string name = 1 [(google.api.field_behavior) = IDENTIFIER];
+  // Used on app startup; changing it does not select the active profile.
+  string startup_profile = 2 [
+    (google.api.field_behavior) = OPTIONAL,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Profile"
+  ];
+  // Empty inherits the selected profile's voice, then the app default.
+  string voice_override = 3 [(google.api.field_behavior) = OPTIONAL];
+  bool api_key_configured = 4 [(google.api.field_behavior) = OUTPUT_ONLY];
+  // Empty means profile selection and editing are not locked.
+  string locked_profile = 5 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Profile"
+  ];
+}
+
+message Profile {
+  option (google.api.resource) = {
+    type: "conversation.reachy-mini.local/Profile"
+    pattern: "profiles/{profile}"
+    singular: "profile"
+    plural: "profiles"
+  };
+
+  string name = 1 [(google.api.field_behavior) = IDENTIFIER];
+  string display_name = 2 [(google.api.field_behavior) = OUTPUT_ONLY];
+  string instructions = 3 [(google.api.field_behavior) = REQUIRED];
+  string greeting = 4 [(google.api.field_behavior) = OPTIONAL];
+  // Empty inherits the app default voice.
+  string voice = 5 [(google.api.field_behavior) = OPTIONAL];
+  repeated string default_tool_ids = 6 [(google.api.field_behavior) = OPTIONAL];
+  // Absent inherits defaults; a present empty selection disables every tool.
+  ToolSelection tool_override = 7 [(google.api.field_behavior) = OPTIONAL];
+  repeated string effective_tool_ids = 8 [(google.api.field_behavior) = OUTPUT_ONLY];
+  // Whether authored content can be edited; tool overrides also work on bundled profiles.
+  bool editable = 9 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+message ToolSelection {
+  repeated string tool_ids = 1 [(google.api.field_behavior) = OPTIONAL];
+}
+
+message Capabilities {
+  option (google.api.resource) = {
+    type: "conversation.reachy-mini.local/Capabilities"
+    pattern: "capabilities"
+    singular: "capabilities"
+    plural: "capabilities"
+  };
+
+  string name = 1 [(google.api.field_behavior) = IDENTIFIER];
+  repeated ToolInfo available_tools = 2 [(google.api.field_behavior) = OUTPUT_ONLY];
+  repeated string available_voices = 3 [(google.api.field_behavior) = OUTPUT_ONLY];
+  string default_voice = 4 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+message ToolInfo {
+  string id = 1 [(google.api.field_behavior) = OUTPUT_ONLY];
+  string description = 2 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+message GetConversationRequest {
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Conversation"
+  ];
+}
+
+message UpdateConversationRequest {
+  Conversation conversation = 1 [(google.api.field_behavior) = REQUIRED];
+  google.protobuf.FieldMask update_mask = 2 [(google.api.field_behavior) = OPTIONAL];
+}
+
+message WatchConversationRequest {
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Conversation"
+  ];
+}
+
+message RestartConversationRequest {
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Conversation"
+  ];
+  // Empty retains the selected profile. Every restart resolves the current voice settings.
+  string profile = 2 [
+    (google.api.field_behavior) = OPTIONAL,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Profile"
+  ];
+}
+
+message SendConversationTextRequest {
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Conversation"
+  ];
+  string text = 2 [(google.api.field_behavior) = REQUIRED];
+}
+
+message SendConversationTextResponse {}
+
+message InterruptConversationRequest {
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Conversation"
+  ];
+}
+
+message InterruptConversationResponse {}
+
+message GetSettingsRequest {
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Settings"
+  ];
+}
+
+message UpdateSettingsRequest {
+  Settings settings = 1 [(google.api.field_behavior) = REQUIRED];
+  google.protobuf.FieldMask update_mask = 2 [(google.api.field_behavior) = OPTIONAL];
+}
+
+message SetSettingsApiKeyRequest {
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Settings"
+  ];
+  string api_key = 2 [(google.api.field_behavior) = REQUIRED];
+}
+
+message GetCapabilitiesRequest {
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Capabilities"
+  ];
+}
+
+message ListProfilesRequest {
+  // Defaults to 50; values over 100 are capped at 100.
+  int32 page_size = 1 [(google.api.field_behavior) = OPTIONAL];
+  string page_token = 2 [(google.api.field_behavior) = OPTIONAL];
+}
+
+message ListProfilesResponse {
+  repeated Profile profiles = 1;
+  string next_page_token = 2;
+}
+
+message GetProfileRequest {
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Profile"
+  ];
+}
+
+message CreateProfileRequest {
+  // user- followed by a lowercase RFC-1034 ID; existing legacy IDs remain readable.
+  string profile_id = 1 [(google.api.field_behavior) = REQUIRED];
+  Profile profile = 2 [(google.api.field_behavior) = REQUIRED];
+}
+
+message UpdateProfileRequest {
+  Profile profile = 1 [(google.api.field_behavior) = REQUIRED];
+  google.protobuf.FieldMask update_mask = 2 [(google.api.field_behavior) = OPTIONAL];
+}
+
+message DeleteProfileRequest {
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference).type = "conversation.reachy-mini.local/Profile"
+  ];
+}

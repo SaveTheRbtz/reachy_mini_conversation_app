@@ -10,11 +10,13 @@ description = ""
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "connectrpc==0.12.1",
     "fastapi",
     "numpy",
     "openai[realtime]>=3.13.0",
     "openai-agents>=0.22.2",
     "pillow>=12.3.0",
+    "protobuf-py==0.4.0",
     "pydantic>=2.13.4",
     "python-dotenv",
     "scipy>=1.17.0",
@@ -42,6 +44,7 @@ reachy-mini-conversation-app = "reachy_mini_conversation_app.main:main"
 exclude-newer = "7 days"
 
 [tool.uv.exclude-newer-package]
+"connectrpc" = false
 "reachy-mini" = false
 "reachy-mini-dances-library" = false
 "openai-agents" = false
@@ -59,6 +62,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 reachy_mini_conversation_app = [
+  "py.typed",
   "static/**/*",
 ]
 reachy_talk_data = [
@@ -67,7 +71,7 @@ reachy_talk_data = [
 
 [tool.ruff]
 line-length = 119
-exclude = [".venv", "dist", "build", "**/__pycache__", "*.egg-info", ".mypy_cache", ".pytest_cache"]
+exclude = [".venv", "dist", "build", "**/__pycache__", "*.egg-info", ".mypy_cache", ".pytest_cache", "src/reachy_mini_conversation_app/gen"]
 
 [tool.ruff.lint]
 select = [
@@ -110,6 +114,10 @@ warn_unused_ignores = true
 [[tool.mypy.overrides]]
 module = ["agents", "agents.*"]
 ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+module = ["reachy_mini_conversation_app.gen.reachy.conversation.v1.api_connect"]
+disable_error_code = ["type-arg"]
 
 [[tool.mypy.overrides]]
 module = ["reachy_mini", "reachy_mini.*", "reachy_mini_dances_library", "reachy_mini_dances_library.*", "soxr", "soxr.*"]
