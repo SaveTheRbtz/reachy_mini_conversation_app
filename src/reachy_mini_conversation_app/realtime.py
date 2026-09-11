@@ -25,6 +25,7 @@ from openai.types.responses import (
 from openai.resources.live.live import AsyncLiveConnection
 from openai.types.live.server_event import ServerEvent
 from openai.types.live.session_config_param import SessionConfigParam
+from openai.types.live.responses_delegation_config_param import Tool
 
 from reachy_mini_conversation_app.config import LIVE_MODEL, DELEGATION_MODEL, config
 from reachy_mini_conversation_app.prompts import (
@@ -186,6 +187,18 @@ class LiveConversation:
             str(self.dependencies.instance_path) if self.dependencies.instance_path is not None else None
         )
         self._tools = {tool.name: tool for tool in get_function_tools(enabled_names)}
+        backend_tools: list[Tool] = [
+            {
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.params_json_schema,
+                "strict": tool.strict_json_schema,
+            }
+            for tool in self._tools.values()
+        ]
+        if "web_search" in enabled_names:
+            backend_tools.append({"type": "web_search"})
         instructions = get_session_instructions(enabled_names)
         if self.history:
             instructions += (
@@ -214,16 +227,7 @@ class LiveConversation:
                     "reasoning": {"effort": "low"},
                     "instructions": get_backend_instructions(self.dependencies),
                     "parallel_tool_calls": False,
-                    "tools": [
-                        {
-                            "type": "function",
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.params_json_schema,
-                            "strict": tool.strict_json_schema,
-                        }
-                        for tool in self._tools.values()
-                    ],
+                    "tools": backend_tools,
                 },
             },
         }

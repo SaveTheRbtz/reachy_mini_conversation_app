@@ -33,11 +33,11 @@ The implementation follows the [GPT-Live guide](https://developers.openai.com/ap
 
 The Python process owns a single Live session, audio conversion, robot media, and tool execution. The optional browser UI only manages local settings and displays session state.
 
-The voice model delegates reasoning to Astra through Responses. The app executes only the active profile's enabled tools and returns their results to the backend. The camera tool sends a JPEG to a separate Astra vision request with low reasoning and `store=False`, then returns its concise description to the backend.
+The voice model delegates reasoning to Astra through Responses. The app executes the active profile's enabled function tools; hosted web search runs directly in the backend. The camera tool sends a JPEG to a separate Astra vision request with low reasoning and `store=False`, then returns its concise description to the backend.
 
 Audio uses persistent soxr resamplers between the robot and Live's 24 kHz PCM stream. Microphone capture and speaker playback run independently of backend work. Playback timing reflects software queues, not proof that sound was physically heard.
 
-A failed microphone send, or one stalled for five seconds, restarts the Live session while local media keeps running. Only the newest pending microphone frame is retained during backpressure. Tool execution has a 30-second deadline; failures return an error without automatically retrying the tool. Typed input queued behind a failed backend response continues in the same session. Startup and graceful finalization are bounded, with transport cleanup if the server stops responding.
+A failed microphone send, or one stalled for five seconds, restarts the Live session while local media keeps running. Only the newest pending microphone frame is retained during backpressure. Local function execution has a 30-second deadline; failures return an error without automatically retrying the tool. Hosted search runs outside that local deadline. Typed input queued behind a failed backend response continues in the same session. Startup and graceful finalization are bounded, with transport cleanup if the server stops responding.
 
 Automatic reconnects retain recent spoken and typed dialogue in memory (up to 32 messages and 4 KiB of UTF-8 text). The replacement session uses it as context and waits for the next request without repeating the greeting or resuming earlier tool actions. Settings changes start a fresh conversation, and history is discarded when the app stops. Transcripts can include interrupted speech that was not heard. Microphone recovery clears playback and restarts capture before asking Live to stop speaking; that command has a five-second send deadline. Emotion-library loading runs in a shared background worker so a cold cache cannot block dialogue.
 
@@ -80,7 +80,7 @@ OPENAI_API_KEY=sk-...
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | Required. Used for `gpt-live-1`, `gpt-6-astra`, and the `gpt-5.6-luna` memory reducer and web-search agent. It can also be saved from the web UI. |
+| `OPENAI_API_KEY` | Required. Used for `gpt-live-1`, `gpt-6-astra`, and the `gpt-5.6-luna` memory reducer. It can also be saved from the web UI. |
 | `OPENAI_VOICE` | Default OpenAI Live voice when neither the active profile nor saved UI settings select one. Defaults to `gleam`, a natural feminine voice. |
 | `REACHY_MINI_CUSTOM_PROFILE` | Optional bundled profile directory name. Ignored after a startup profile has been saved in the UI. |
 | `REACHY_MINI_APP_TIMEOUT_MINUTES` | Minutes of inactivity before Reachy sleeps and the app stops. Defaults to `15`; set to `0` to disable. |
@@ -130,7 +130,7 @@ The default profile enables the following catalog. Tools → Tool access can ena
 | `manage_memory` | Consolidate an explicit durable user statement into shared household memory. |
 | `web_search` | Search the public web for current information, weather, or local time. |
 
-Robot and memory function tools use explicit typed signatures and receive `ToolDependencies` through `RunContextWrapper`. Their failures return `{"error": ...}` so a tool problem does not tear down the Live session. The backend exposes web search through an Agents SDK agent-as-tool; the nested `gpt-5.6-luna` Responses agent uses OpenAI's hosted `WebSearchTool` with low reasoning and search context, and `store=False`.
+Robot and memory function tools use explicit typed signatures and receive `ToolDependencies` through `RunContextWrapper`. Their failures return `{"error": ...}` so a tool problem does not tear down the Live session. Web search uses Live's hosted `web_search` tool on the Astra backend and respects the active profile's tool selection.
 
 ### Memory
 
@@ -178,7 +178,7 @@ mypy --pretty --show-error-codes
 pytest tests/ -v
 ```
 
-The OpenAI integration tests exercise the production Live session, delegated robot tools, memory persistence and
+The OpenAI integration tests exercise the production Live session, delegated robot tools, hosted search, memory persistence and
 forgetting, homework guidance, PCM audio, and camera vision through paid Live and Responses calls. They replay
 checked-in 24 kHz mono PCM speech through Reachy's 16 kHz stereo input, check grounded spoken replies, and verify
 session finalization. The camera test includes a full JPEG that exceeds Live's backend input-history limit.

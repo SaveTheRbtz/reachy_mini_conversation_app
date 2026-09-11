@@ -565,3 +565,25 @@ async def test_malformed_backend_event_fails_without_logging_private_content(cap
         )
     assert "Invalid Live backend event" in caplog.text
     assert "private instructions" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("search_enabled", [False, True])
+async def test_session_registers_hosted_search_only_when_enabled(
+    live_transport: LiveTransport, monkeypatch: pytest.MonkeyPatch, search_enabled: bool
+) -> None:
+    """Keep hosted search selection consistent with local tools and frontend capabilities."""
+    selected = ["head_tracking", "web_search"] if search_enabled else ["head_tracking"]
+    monkeypatch.setattr(realtime_module, "selected_tool_names", lambda _: selected)
+    conversation = _conversation()
+    task = asyncio.create_task(conversation.start_up())
+    try:
+        await _eventually(lambda: live_transport.session.start.await_count == 1)
+        session = live_transport.session.start.await_args.kwargs["session"]
+        tools = session["delegation"]["responses"]["tools"]
+        assert [tool.get("name") for tool in tools if tool["type"] == "function"] == ["head_tracking"]
+        assert ({"type": "web_search"} in tools) is search_enabled
+        assert ("- web_search:" in session["instructions"]) is search_enabled
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

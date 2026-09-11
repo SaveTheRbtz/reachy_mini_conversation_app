@@ -47,6 +47,7 @@ class ObservedConversation(LiveConversation):
         self.transcript = ""
         self.input_transcript = ""
         self.backend_completions = 0
+        self.hosted_searches = 0
         self.errors: list[str] = []
         self.played_samples = 0
         self.finalized = False
@@ -58,6 +59,10 @@ class ObservedConversation(LiveConversation):
             self.input_transcript += event.delta
         elif event.type == "response.event" and event.event.get("type") == "response.completed":
             self.backend_completions += 1
+        elif event.type == "response.event" and event.event.get("type") == "response.output_item.done":
+            item = event.event.get("item")
+            if isinstance(item, dict) and item.get("type") == "web_search_call":
+                self.hosted_searches += 1
         elif event.type == "error":
             self.errors.append(event.error.code)
         elif event.type == "session.closed":
@@ -173,6 +178,18 @@ async def test_typed_request_executes_production_tool(tmp_path: Path) -> None:
         )
         await _wait_for_content(conversation, lambda text: "track" in text or "follow" in text)
         conversation.dependencies.movement_manager.set_head_tracking.assert_called_once_with(True)
+
+
+async def test_hosted_search_returns_a_spoken_answer(tmp_path: Path) -> None:
+    """Run native backend web search and return its answer through Live audio."""
+    async with _live_session(tmp_path) as conversation:
+        await conversation.say(
+            "Use web search to check the official Python documentation for the name of its standard library "
+            "module for async/await concurrency. Briefly tell me the module name after checking."
+        )
+        await _wait_for_content(
+            conversation, lambda text: conversation.hosted_searches > 0 and "asyncio" in text.replace(" ", "")
+        )
 
 
 async def test_memory_changes_persist_across_live_sessions(tmp_path: Path) -> None:

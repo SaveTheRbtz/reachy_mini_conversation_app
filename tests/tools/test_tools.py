@@ -12,7 +12,7 @@ from agents.tool_context import ToolContext
 
 import reachy_mini_conversation_app.tools.camera as camera_module
 from reachy_mini_conversation_app.tools.camera import camera
-from reachy_mini_conversation_app.tools.core_tools import get_function_tools
+from reachy_mini_conversation_app.tools.core_tools import get_function_tools, available_tool_catalog
 from reachy_mini_conversation_app.tools.go_to_sleep import go_to_sleep
 from reachy_mini_conversation_app.tools.head_tracking import head_tracking
 
@@ -145,9 +145,10 @@ def test_static_tool_registry_rejects_unknown_profile_entries() -> None:
     """Fail profile validation when a tool is outside the fixed catalog."""
     with pytest.raises(ValueError, match="Unknown profile tools: removed_tool"):
         get_function_tools(["camera", "removed_tool"])
+    with pytest.raises(ValueError, match="Unknown profile tools: removed_tool"):
+        available_tool_catalog(["web_search", "removed_tool"])
 
     assert [tool.name for tool in get_function_tools(["camera", "web_search", "move_head"])] == [
         "camera",
         "move_head",
-        "web_search",
     ]
