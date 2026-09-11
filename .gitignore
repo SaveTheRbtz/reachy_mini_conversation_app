@@ -37,6 +37,11 @@ node_modules/
 test-results/
 playwright-report/
 
+# Generated API and packaged frontend
+frontend/src/gen/
+src/reachy_mini_conversation_app/gen/
+src/reachy_mini_conversation_app/static/
+
 # IDE
 .vscode/
 .idea/

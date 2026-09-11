@@ -54,13 +54,18 @@ The inactivity timer follows spoken or typed dialogue and survives reconnects; c
 
 Using [uv](https://docs.astral.sh/uv/) with Python 3.12 is recommended:
 
+For a Git checkout, install Node.js 22.12 or newer (including npm) and fetch the Git LFS assets with `git lfs pull`.
+The Python build hook installs locked frontend dependencies, generates the API, and builds the SPA automatically.
+Source builds require network access to npm and the pinned Buf generators. Release wheels and source distributions
+already contain these outputs; installing them or a published Hugging Face app does not require Node.js, Buf, or protoc.
+
 ```bash
 uv venv --python python3.12 .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 uv sync --group dev
 ```
 
-For a runtime-only install, use `uv sync`. Use `uv sync --frozen` to install exactly what is recorded in `uv.lock`.
+For a runtime-only environment, use `uv sync --no-dev`. Use `uv sync --frozen` to install exactly what is recorded in `uv.lock`.
 
 With pip:
 
@@ -194,28 +199,36 @@ reconnects this read-only stream after interruption without replaying commands. 
 requests, including calls from clients that omit a deadline. Network finalization runs in the conversation loop after a
 restart is accepted, so the UI stays responsive while the old session closes.
 
-For development, install the Python environment and Node.js 22.12 or newer, then build and test:
+For development, install Node.js 22.12 or newer, then build and test:
 
 ```bash
 uv sync --frozen
-npm ci
 npm test
 npx playwright install chromium
 npm run test:e2e
 ```
 
 `npm run dev` serves the SPA with hot reload and proxies `/rpc` to the app on port 7860.
-`npm run format` formats the frontend. `npm run check` checks formatting, templates, and TypeScript without emitting
-files; `npm run build` regenerates the packaged UI.
+`npm run format` formats the frontend. `npm run check` checks formatting, protobuf schemas, templates, and TypeScript;
+`npm run build` builds the packaged UI. Development, checks, and builds regenerate the API automatically through npm's
+`predev`, `precheck`, and `prebuild` hooks. After editing a schema while the dev server is running, run `npm run generate`
+and restart the Python app. `uv sync` also rebuilds when its tracked source inputs change.
 Vue's type checker uses the maintained TypeScript 6 compiler API through the official `@typescript/typescript6` package.
-After editing the protobuf schema, run `npm run generate` to regenerate both languages using the pinned generators.
-Commit the generated Python, TypeScript, and static assets alongside their sources. Running or installing the app does not
-require Node.js, Buf, or protoc. Generation uses pinned remote Buf plugins and requires network access.
 
-After committing, `npm run check:generated` validates the schema, regenerates both languages and the bundle, and verifies
-that every output is committed. The Frontend workflow checks formatting, strict types, schemas, code generation, and
-the Vite build independently of the API/browser tests, which exercise the committed assets. `npm run test:api` runs the
-generated-client tests; `npm run test:e2e` runs Playwright desktop/mobile tests. Both run against the production Python API,
+Commit schemas, handwritten source, `buf.lock`, `buf.gen.yaml`, `package-lock.json`, and `uv.lock`. Generated Python under
+`src/reachy_mini_conversation_app/gen/`, TypeScript under `frontend/src/gen/`, and the compiled `static/` directory are
+ignored build outputs. Keep editing SVG avatars under `frontend/public/avatars/`; their packaged copies are generated.
+Buf plugin versions and revisions are pinned. Hosted generated SDK packages are unnecessary for this single-repository
+API; schema and application changes can be built and tested together without publishing a separate contract package.
+
+`uv build` creates a source distribution and then builds its wheel. Both include the generated runtime files and SPA;
+building a wheel from the source distribution reuses those files. CI builds from a clean checkout, type-checks the generated
+contracts, and uploads installable distributions for seven days. GitHub releases attach both distributions. Hugging Face
+sync publishes the extracted source distribution so the Reachy SDK can install it without frontend build tools.
+
+The Frontend workflow checks formatting, strict types, schemas, code generation, and the production build.
+`npm run test:api` runs generated-client tests; `npm run test:e2e` runs Playwright desktop/mobile tests.
+Both run against the production Python API,
 storage, and conversation/audio loops. Each test gets an isolated temporary instance;
 only robot hardware and OpenAI I/O are simulated. Tests cover saved state, tool inheritance, reconnects, stalled calls,
 unsaved drafts, and command counts to detect unintended retries. Failed browser tests retain screenshots, traces, and video

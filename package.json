@@ -3,10 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "npm run generate",
     "dev": "vite",
+    "prebuild": "npm run generate",
     "build": "vite build",
+    "precheck": "npm run generate",
     "check": "prettier --check frontend vite.config.ts playwright.config.ts tsconfig*.json package.json && buf lint && vue-tsc --noEmit -p tsconfig.test.json",
-    "check:generated": "node --experimental-strip-types frontend/check-generated.ts",
     "generate": "buf generate",
     "test": "npm run check && npm run build && npm run test:api",
     "test:api": "node --experimental-strip-types --test frontend/tests/*.test.ts",

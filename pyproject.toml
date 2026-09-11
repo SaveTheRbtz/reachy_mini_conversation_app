@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling==1.32.0"]
+build-backend = "hatchling.build"
 
 [project]
 name = "reachy_mini_conversation_app"
@@ -29,6 +29,7 @@ dependencies = [
 [dependency-groups]
 dev = [
   "allure-pytest>=2.16.0",
+  "hatchling==1.32.0",
   "pytest",
   "pytest-asyncio",
   "pytest-cov>=7.1.0",
@@ -42,6 +43,23 @@ reachy-mini-conversation-app = "reachy_mini_conversation_app.main:main"
 
 [tool.uv]
 exclude-newer = "7 days"
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "hatch_build.py" },
+  { file = "README.md" },
+  { file = "package*.json" },
+  { file = "buf.*" },
+  { file = "proto/**/*.proto" },
+  { file = "vite.config.ts" },
+  { file = "tsconfig*.json" },
+  { file = "frontend/index.html" },
+  { file = "frontend/src/*.ts" },
+  { file = "frontend/src/*.vue" },
+  { file = "frontend/src/*.css" },
+  { file = "frontend/src/components/**/*" },
+  { file = "frontend/src/views/**/*" },
+  { file = "frontend/public/**/*" },
+]
 
 [tool.uv.exclude-newer-package]
 "connectrpc" = false
@@ -53,20 +71,41 @@ exclude-newer = "7 days"
 [project.entry-points."reachy_mini_apps"]
 reachy_mini_conversation_app = "reachy_mini_conversation_app.main:ReachyMiniConversationApp"
 
-[tool.setuptools]
-package-dir = { "" = "src" }
-include-package-data = true
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-reachy_mini_conversation_app = [
-  "py.typed",
-  "static/**/*",
+[tool.hatch.build]
+artifacts = [
+  "src/reachy_mini_conversation_app/gen/**",
+  "src/reachy_mini_conversation_app/static/**",
+  "frontend/src/gen/**",
 ]
-reachy_talk_data = [
-  "profiles/**/*.md",
+
+[tool.hatch.build.hooks.custom]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reachy_mini_conversation_app", "src/reachy_talk_data"]
+
+[tool.hatch.build.targets.wheel.force-include]
+profiles = "reachy_talk_data/profiles"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/profiles",
+  "/frontend",
+  "/proto",
+  "/tests",
+  "/docs/assets",
+  "/pyproject.toml",
+  "/uv.lock",
+  "/hatch_build.py",
+  "/package*.json",
+  "/buf.*",
+  "/tsconfig*.json",
+  "/vite.config.ts",
+  "/playwright.config.ts",
+  "/.prettier*",
+  "/.env.example",
+  "/README.md",
+  "/LICENSE",
 ]
 
 [tool.ruff]
@@ -105,7 +144,7 @@ line-ending = "auto"
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src/"]
+files = ["src/", "hatch_build.py"]
 ignore_missing_imports = true
 strict = true
 show_error_codes = true

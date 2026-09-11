@@ -39,6 +39,3 @@
 *.vis lfs
 *.db lfs
 *.ply lfs
-src/reachy_mini_conversation_app/static/** linguist-generated=true
-src/reachy_mini_conversation_app/gen/** linguist-generated=true
-frontend/src/gen/** linguist-generated=true

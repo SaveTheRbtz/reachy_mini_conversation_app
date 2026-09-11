@@ -1,5 +1,8 @@
+import os
+import sys
 import shutil
 import logging
+import tarfile
 import zipfile
 import subprocess
 from types import SimpleNamespace
@@ -334,19 +337,24 @@ def test_project_file_paths_stay_within_windows_budget() -> None:
 
 
 def test_wheel_file_paths_stay_within_windows_budget(tmp_path: Path) -> None:
-    """A wheel built from the sdist includes SPA assets and fits the Windows path budget."""
+    """Source distributions install offline without Node and contain complete, portable wheels."""
     project_root = Path(__file__).parents[1].resolve()
     source_checkout = tmp_path / "checkout"
     dist_dir = tmp_path / "dist"
+    uv = shutil.which("uv")
+    assert uv is not None
 
     for source_file in _git_tracked_files(project_root):
         target_file = source_checkout / source_file.relative_to(project_root)
         target_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_file, target_file)
 
+    assert not (source_checkout / "src/reachy_mini_conversation_app/gen").exists()
+    assert not (source_checkout / "src/reachy_mini_conversation_app/static").exists()
+
     try:
         subprocess.run(
-            ["uv", "build", "--out-dir", str(dist_dir)],
+            [uv, "build", "--out-dir", str(dist_dir)],
             cwd=source_checkout,
             check=True,
             capture_output=True,
@@ -356,12 +364,48 @@ def test_wheel_file_paths_stay_within_windows_budget(tmp_path: Path) -> None:
         details = exc.stderr if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)
         pytest.fail(f"Distribution build failed while checking Windows path budget: {details}")
 
-    assert len(list(dist_dir.glob("*.tar.gz"))) == 1
-    wheel_files = list(dist_dir.glob("*.whl"))
-    assert len(wheel_files) == 1, f"Expected exactly one built wheel in {dist_dir}, found: {wheel_files}"
+    source_archives = list(dist_dir.glob("*.tar.gz"))
+    assert len(source_archives) == 1
+    assert len(list(dist_dir.glob("*.whl"))) == 1
+    extracted = tmp_path / "extracted"
+    with tarfile.open(source_archives[0]) as archive:
+        archive.extractall(extracted, filter="data")
+    source_distribution = next(extracted.iterdir())
+    assert (source_distribution / "PKG-INFO").is_file()
+    assert (source_distribution / "README.md").read_bytes() == (project_root / "README.md").read_bytes()
+    assert (source_distribution / "docs/assets/conversation_app_arch.svg").is_file()
 
+    node_free_dist = tmp_path / "node-free-dist"
+    subprocess.run(
+        [uv, "build", "--wheel", "--offline", "--python", sys.executable, "--out-dir", str(node_free_dist)],
+        cwd=source_distribution,
+        env={**os.environ, "PATH": ""},
+        check=True,
+    )
+    wheel_files = list(node_free_dist.glob("*.whl"))
+    assert len(wheel_files) == 1
+
+    installed = tmp_path / "installed"
     with zipfile.ZipFile(wheel_files[0]) as archive:
         archived_paths = [PurePosixPath(info.filename) for info in archive.infolist() if not info.is_dir()]
+        archive.extractall(installed)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; "
+            "from importlib.resources import files; "
+            "from reachy_mini_conversation_app.gen.reachy.conversation.v1 import api_pb, api_connect; "
+            "assert Path(api_pb.__file__).is_relative_to(Path.cwd()); "
+            "assert Path(api_connect.__file__).is_relative_to(Path.cwd()); "
+            "assert files('reachy_mini_conversation_app').joinpath('static/index.html').is_file(); "
+            "assert files('reachy_talk_data').joinpath('profiles/default/profile.md').is_file()",
+        ],
+        cwd=installed,
+        env={**os.environ, "PATH": "", "PYTHONPATH": str(installed)},
+        check=True,
+    )
 
     for asset in (source_checkout / "src" / "reachy_mini_conversation_app" / "static").rglob("*"):
         if asset.is_file():
