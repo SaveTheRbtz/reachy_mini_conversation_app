@@ -1,17 +1,13 @@
 import json
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from openai import OpenAIError
 from agents.tool_context import ToolContext
 
-import reachy_mini_conversation_app.tools.manage_memory as manage_memory_module
-from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.memory import MAX_MEMORY_BYTES, MemorySnapshot, load_memory, save_memory
 from reachy_mini_conversation_app.prompts import get_backend_instructions, get_session_instructions
-from reachy_mini_conversation_app.tools.manage_memory import MEMORY_MODEL, manage_memory
+from reachy_mini_conversation_app.tools.manage_memory import manage_memory
 
 
 def _tool_context(dependencies: object, arguments: str) -> ToolContext:
@@ -23,79 +19,34 @@ def _tool_context(dependencies: object, arguments: str) -> ToolContext:
     )
 
 
-def _mock_memory_response(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    snapshot: MemorySnapshot | None = None,
-    error: Exception | None = None,
-) -> tuple[MagicMock, AsyncMock]:
-    parse = AsyncMock(side_effect=error)
-    if error is None:
-        parse.return_value = SimpleNamespace(output_parsed=snapshot)
-    client = SimpleNamespace(responses=SimpleNamespace(parse=parse))
-    client_context = MagicMock()
-    client_context.__aenter__ = AsyncMock(return_value=client)
-    client_context.__aexit__ = AsyncMock(return_value=None)
-    constructor = MagicMock(return_value=client_context)
-    monkeypatch.setattr(manage_memory_module, "AsyncOpenAI", constructor)
-    return constructor, parse
-
-
 @pytest.mark.asyncio
-async def test_manage_memory_replaces_loaded_snapshot_and_persists(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Replace the complete snapshot through one typed Responses call."""
+async def test_manage_memory_replaces_loaded_snapshot_and_persists(tmp_path: Path) -> None:
+    """Persist a complete typed replacement supplied by the conversation backend."""
     save_memory(MemorySnapshot(memories=["Любит книги о Земле."]), tmp_path)
     current = load_memory(tmp_path)
     replacement = MemorySnapshot(memories=["Любит книги о космосе."])
     dependencies = SimpleNamespace(memory=current, instance_path=tmp_path)
-    statement = "Теперь мне больше нравятся книги о космосе, а не о Земле."
-    arguments = json.dumps({"user_statement": statement}, ensure_ascii=False)
-    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
-    constructor, parse = _mock_memory_response(monkeypatch, snapshot=replacement)
+    arguments = json.dumps({"replacement": replacement.model_dump()}, ensure_ascii=False)
 
     result = await manage_memory.on_invoke_tool(_tool_context(dependencies, arguments), arguments)
 
     assert result == {"status": "updated"}
-    assert dependencies.memory is replacement
+    assert dependencies.memory == replacement
     assert load_memory(tmp_path) == replacement
     assert not (tmp_path / "memory.json.tmp").exists()
-    constructor.assert_called_once_with(api_key="test-key", max_retries=0)
-    parse.assert_awaited_once()
-    request = parse.await_args.kwargs
-    assert request["model"] == MEMORY_MODEL
-    assert request["reasoning"] == {"effort": "high"}
-    assert request["store"] is False
-    assert request["text_format"] is MemorySnapshot
-    assert "tools" not in request
-    assert "previous_response_id" not in request
-    assert json.loads(request["input"]) == {
-        "current_snapshot": {"memories": ["Любит книги о Земле."]},
-        "user_statement": statement,
-    }
-    assert manage_memory.params_json_schema["required"] == ["user_statement"]
-    assert "exact relevant wording" in manage_memory.params_json_schema["properties"]["user_statement"]["description"]
-    assert "exact relevant user wording" in manage_memory.description
     schema = MemorySnapshot.model_json_schema()
     assert "shared household" in schema["description"]
     assert "full replacement list" in schema["properties"]["memories"]["description"]
 
 
 @pytest.mark.asyncio
-async def test_manage_memory_reports_unchanged_snapshot_as_not_saved(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Never present an unchanged reducer result as a successful update."""
+async def test_manage_memory_reports_unchanged_snapshot_as_not_saved(tmp_path: Path) -> None:
+    """Never present an unchanged replacement as a successful update."""
     original = MemorySnapshot(memories=["Любит шахматы."])
     save_memory(original, tmp_path)
     original_bytes = (tmp_path / "memory.json").read_bytes()
     dependencies = SimpleNamespace(memory=original, instance_path=tmp_path)
-    arguments = json.dumps({"user_statement": "Мой пароль — секрет."}, ensure_ascii=False)
-    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
-    _mock_memory_response(monkeypatch, snapshot=original.model_copy(deep=True))
+    arguments = json.dumps({"replacement": original.model_dump()}, ensure_ascii=False)
 
     result = await manage_memory.on_invoke_tool(_tool_context(dependencies, arguments), arguments)
 
@@ -108,34 +59,27 @@ async def test_manage_memory_reports_unchanged_snapshot_as_not_saved(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["api", "oversized", "save"])
+@pytest.mark.parametrize("failure", ["oversized", "save"])
 async def test_manage_memory_failure_preserves_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
-    """Keep both memory copies unchanged when reduction or persistence fails."""
+    """Keep both memory copies unchanged when validation or persistence fails."""
     original = MemorySnapshot(memories=["Любит шахматы."])
     save_memory(original, tmp_path)
     original_bytes = (tmp_path / "memory.json").read_bytes()
     dependencies = SimpleNamespace(memory=original, instance_path=tmp_path)
-    arguments = json.dumps({"user_statement": "Теперь любит го."}, ensure_ascii=False)
-    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
-
-    if failure == "api":
-        _mock_memory_response(monkeypatch, error=OpenAIError("offline"))
-    elif failure == "oversized":
-        _mock_memory_response(
-            monkeypatch,
-            snapshot=MemorySnapshot(memories=["x" * MAX_MEMORY_BYTES]),
-        )
+    if failure == "oversized":
+        replacement = MemorySnapshot(memories=["x" * MAX_MEMORY_BYTES])
     else:
-        _mock_memory_response(monkeypatch, snapshot=MemorySnapshot(memories=["Любит го."]))
+        replacement = MemorySnapshot(memories=["Любит го."])
 
         def fail_replace(_temporary_path: Path, _target: Path) -> Path:
             raise OSError("disk unavailable")
 
         monkeypatch.setattr(Path, "replace", fail_replace)
+    arguments = json.dumps({"replacement": replacement.model_dump()}, ensure_ascii=False)
 
     result = await manage_memory.on_invoke_tool(_tool_context(dependencies, arguments), arguments)
 
@@ -143,6 +87,22 @@ async def test_manage_memory_failure_preserves_snapshot(
     assert dependencies.memory is original
     assert dependencies.memory.memories == ["Любит шахматы."]
     assert (tmp_path / "memory.json").read_bytes() == original_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", [{"memories": "not a list"}, {"memories": [], "unexpected": True}])
+async def test_manage_memory_rejects_invalid_replacement(tmp_path: Path, replacement: dict[str, object]) -> None:
+    """Invalid tool arguments must leave household memory untouched."""
+    original = MemorySnapshot(memories=["Любит шахматы."])
+    save_memory(original, tmp_path)
+    dependencies = SimpleNamespace(memory=original, instance_path=tmp_path)
+    arguments = json.dumps({"replacement": replacement})
+
+    result = await manage_memory.on_invoke_tool(_tool_context(dependencies, arguments), arguments)
+
+    assert result != {"status": "updated"}
+    assert dependencies.memory is original
+    assert load_memory(tmp_path) == original
 
 
 def test_backend_instructions_inject_current_memory_as_untrusted_context() -> None:

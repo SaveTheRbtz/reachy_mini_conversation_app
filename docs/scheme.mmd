@@ -10,10 +10,9 @@ flowchart TB
     App@{ label: "<span style='font-size:16px;font-weight:bold;'>Conversation App</span><br><span style='font-size:12px;color:#0277bd;'>One session owner + audio bridge</span>" }
     Live@{ label: "<span style='font-size:16px;font-weight:bold;'>OpenAI Live</span><br><span style='font-size:12px;color:#7b1fa2;'>gpt-live-1 continuous voice</span>" }
     Backend@{ label: "<span style='font-size:16px;font-weight:bold;'>Responses Backend</span><br><span style='font-size:12px;color:#7b1fa2;'>gpt-6-astra, low reasoning</span>" }
-    Tools@{ label: "<span style='font-size:16px;font-weight:bold;'>Typed Tool Layer</span><br><span style='font-size:12px;color:#f9a825;'>Robot functions + memory + web search</span>" }
+    Tools@{ label: "<span style='font-size:16px;font-weight:bold;'>Typed Tool Layer</span><br><span style='font-size:12px;color:#f9a825;'>Robot functions + memory persistence</span>" }
     Vision@{ label: "<span style='font-size:16px;font-weight:bold;'>Camera Vision</span><br><span style='font-size:12px;color:#7b1fa2;'>gpt-6-astra, low reasoning, store=False</span>" }
-    Reducer@{ label: "<span style='font-size:16px;font-weight:bold;'>Memory Reducer</span><br><span style='font-size:12px;color:#7b1fa2;'>gpt-5.6-luna Structured Output</span>" }
-    Search@{ label: "<span style='font-size:16px;font-weight:bold;'>OpenAI Web Search</span><br><span style='font-size:12px;color:#7b1fa2;'>gpt-5.6-luna Responses agent</span>" }
+    Search@{ label: "<span style='font-size:16px;font-weight:bold;'>OpenAI Web Search</span><br><span style='font-size:12px;color:#7b1fa2;'>Hosted by the Responses backend</span>" }
     Profiles@{ label: "<span style='font-size:16px;font-weight:bold;'>Profile State</span><br><span style='font-size:12px;color:#6a1b9a;'>Personality prompt + enabled tools</span>" }
     Context@{ label: "<span style='font-size:16px;font-weight:bold;'>Typed Run Context</span><br><span style='font-size:12px;color:#6a1b9a;'>ToolDependencies + MemorySnapshot</span>" }
     Memory@{ label: "<span style='font-size:16px;font-weight:bold;'>Shared Household Memory</span><br><span style='font-size:12px;color:#6a1b9a;'>Atomic memory.json</span>" }
@@ -27,9 +26,7 @@ flowchart TB
     Tools -- concise results --> Backend
     Tools -- question + JPEG --> Vision
     Vision -- visual description --> Tools
-    Tools -- snapshot + statement --> Reducer
-    Reducer -- replacement snapshot --> Tools
-    Tools <--> Search
+    Backend <--> Search
     Profiles --> App
     App -- owns --> Context
     Profiles -- voice instructions --> Live
@@ -45,7 +42,6 @@ flowchart TB
     App:::uiStyle
     Live:::aiStyle
     Backend:::aiStyle
-    Reducer:::aiStyle
     Vision:::aiStyle
     Search:::aiStyle
     Robot:::hardwareStyle

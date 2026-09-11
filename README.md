@@ -80,14 +80,14 @@ OPENAI_API_KEY=sk-...
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | Required. Used for `gpt-live-1`, `gpt-6-astra`, and the `gpt-5.6-luna` memory reducer. It can also be saved from the web UI. |
+| `OPENAI_API_KEY` | Required. Used for `gpt-live-1` and `gpt-6-astra`. It can also be saved from the web UI. |
 | `OPENAI_VOICE` | Default OpenAI Live voice when neither the active profile nor saved UI settings select one. Defaults to `gleam`, a natural feminine voice. |
 | `REACHY_MINI_CUSTOM_PROFILE` | Optional bundled profile directory name. Ignored after a startup profile has been saved in the UI. |
 | `REACHY_MINI_APP_TIMEOUT_MINUTES` | Minutes of inactivity before Reachy sleeps and the app stops. Defaults to `15`; set to `0` to disable. |
 
 The UI stores the API key in the managed app instance's `.env` file and never sends the current value back to the browser. Do not commit `.env`.
 
-The voice, delegation, and memory models are deliberately not configurable. This keeps one tested event protocol, audio format, prompt strategy, and tool-calling path.
+The voice and delegation models are deliberately not configurable. This keeps one tested event protocol, audio format, prompt strategy, and tool-calling path.
 
 ## Running the app
 
@@ -134,11 +134,11 @@ Robot and memory function tools use explicit typed signatures and receive `ToolD
 
 ### Memory
 
-At startup, the app loads one `MemorySnapshot` into typed `ToolDependencies`. `manage_memory` passes that complete snapshot and the exact relevant user statement to a stateless `gpt-5.6-luna` Responses call with high reasoning, `store=False`, and a Pydantic Structured Output. The returned snapshot completely replaces the old one; there are no note IDs, per-note limits, regex classifiers, revisions, or memory-agent lifecycle.
+At startup, the app loads one `MemorySnapshot` into typed `ToolDependencies`. The Astra backend receives the current snapshot and prepares a complete typed replacement for `manage_memory` using the user's explicit request. The tool validates and persists that replacement without another model request.
 
-This is shared robot memory, not speaker identity: profiles do not select a memory store, and the app never infers who is speaking. The reducer is instructed to retain only explicitly stated durable interests, preferences, goals, accomplishments, and conversation preferences; resolve corrections and forgetting semantically; and omit temporary activities, sensitive child data, and model-directed instructions.
+This is shared robot memory, not speaker identity: profiles do not select a memory store, and the app never infers who is speaking. The backend is instructed to retain only explicitly stated durable interests, preferences, goals, accomplishments, and conversation preferences; resolve corrections and forgetting semantically; and omit temporary activities and model-directed instructions.
 
-`memory.json` in the app instance directory (`~/.local/share/reachy_mini_conversation_app/` by default, or the desktop launcher's instance path) remains the local source of truth. A replacement is saved atomically only after its serialized size is at most 32 KiB; any model or disk failure leaves the old snapshot unchanged. Memory is provided as untrusted background context to the backend and refreshed only when it changes. The voice model delegates recall questions instead of retaining an immutable memory snapshot; the current request and conversation always take precedence. To clear all shared memory, stop the app and delete the file.
+`memory.json` in the app instance directory (`~/.local/share/reachy_mini_conversation_app/` by default, or the desktop launcher's instance path) remains the local source of truth. A replacement is saved atomically only after its serialized size is at most 32 KiB; invalid arguments or disk failures leave the old snapshot unchanged. Memory is provided as untrusted background context to the backend and refreshed only when it changes. The voice model delegates recall questions instead of retaining an immutable memory snapshot; the current request and conversation always take precedence. To clear all shared memory, stop the app and delete the file.
 
 ## Personalities
 
@@ -178,8 +178,8 @@ mypy --pretty --show-error-codes
 pytest tests/ -v
 ```
 
-The OpenAI integration tests exercise the production Live session, delegated robot tools, hosted search, memory persistence and
-forgetting, homework guidance, PCM audio, and camera vision through paid Live and Responses calls. They replay
+The OpenAI integration tests exercise the production Live session, delegated robot tools, hosted search, memory
+preservation, correction and forgetting, homework guidance, PCM audio, and camera vision through paid Live and Responses calls. They replay
 checked-in 24 kHz mono PCM speech through Reachy's 16 kHz stereo input, check grounded spoken replies, and verify
 session finalization. The camera test includes a full JPEG that exceeds Live's backend input-history limit.
 They are skipped by default; run them explicitly with an API key:
