@@ -14,244 +14,91 @@ tags:
 
 # Reachy Mini conversation app
 
-A low-latency voice, vision, and motion app for Reachy Mini. OpenAI `gpt-live-1` handles continuous voice conversation, with `gpt-6-astra` at low reasoning effort for delegated reasoning and tools.
+Talk with Reachy Mini. Ask questions, show it an object, or ask it to dance.
+Choose a personality and teach it preferences you want it to remember.
 
 ![Reachy Mini Dance](docs/assets/reachy_mini_dance.gif)
 
-## Overview
-
-- Streams microphone and speaker audio directly between Reachy Mini and OpenAI Live.
-- Listens and speaks continuously, with natural backchannels and interruption handling.
-- Exposes typed Agents SDK function tools for motion, camera, sleep, and shared household memory.
-- Uses OpenAI's hosted web search for current information, including weather and local time.
-- Supports bundled and user-created personalities with per-profile tool access.
-- Keeps shared household memory in the app instance directory; OpenAI processes updates but is not the durable store.
-
-The implementation follows the [GPT-Live guide](https://developers.openai.com/api/docs/guides/live), [prompting guide](https://developers.openai.com/api/docs/guides/live-prompting), and [delegation guide](https://developers.openai.com/api/docs/guides/live-delegation).
-
-## Architecture
-
-The Python process owns a single Live session, audio conversion, robot media, and tool execution. The optional browser UI only manages local settings and displays session state.
-
-The voice model delegates reasoning to Astra through Responses. The app executes the active profile's enabled function tools; hosted web search runs directly in the backend. The camera tool returns a native image for Astra to inspect in the same conversation. Frames keep their aspect ratio without upscaling, with a maximum dimension of 512 pixels and WebP quality 85. The backend uses `detail="high"` for [standard high-fidelity image understanding](https://developers.openai.com/api/docs/guides/images-vision#choose-an-image-detail-level). Encoded images above 20 KiB return a tool error to leave room within Live's backend input buffer.
-
-Audio uses persistent soxr resamplers between the robot and Live's 24 kHz PCM stream. Microphone capture and speaker playback run independently of backend work. Playback timing reflects software queues, not proof that sound was physically heard.
-
-A failed microphone send, or one stalled for five seconds, restarts the Live session while local media keeps running. Only the newest pending microphone frame is retained during backpressure. Local function execution has a 30-second deadline; failures return an error without automatically retrying the tool. Hosted search runs outside that local deadline. Typed input queued behind a failed backend response continues in the same session. Startup and graceful finalization are bounded, with transport cleanup if the server stops responding.
-
-Automatic reconnects retain recent spoken and typed dialogue in memory (up to 32 messages and 4 KiB of UTF-8 text). The replacement session uses it as context and waits for the next request without repeating the greeting or resuming earlier tool actions. Settings changes start a fresh conversation, and history is discarded when the app stops. Transcripts can include interrupted speech that was not heard. Microphone recovery clears playback and restarts capture before asking Live to stop speaking; that command has a five-second send deadline. Emotion-library loading runs in a shared background worker so a cold cache cannot block dialogue.
-
-The inactivity timer follows spoken or typed dialogue and survives reconnects; connection changes and audio packets do not reset it. The UI shows microphone state independently of local playback. Continuous listening does not freeze antenna motion or suppress idle breathing; speaking still coordinates head tracking.
-
-<p align="center">
-  <img src="docs/assets/conversation_app_arch.svg" alt="Architecture Diagram" width="600"/>
-</p>
-
 ## Installation
 
-> [!IMPORTANT]
-> Install the [Reachy Mini SDK](https://github.com/pollen-robotics/reachy_mini/) first. Windows support remains experimental.
+You need a working [Reachy Mini and daemon](https://github.com/pollen-robotics/reachy_mini/),
+an internet connection, and an OpenAI API key.
 
-Using [uv](https://docs.astral.sh/uv/) with Python 3.12 is recommended:
-
-For a Git checkout, install Node.js 22.12 or newer (including npm) and fetch the Git LFS assets with `git lfs pull`.
-The Python build hook installs locked frontend dependencies, generates the API, and builds the SPA automatically.
-Source builds require network access to npm and the pinned Buf generators. Release wheels and source distributions
-already contain these outputs; installing them or a published Hugging Face app does not require Node.js, Buf, or protoc.
+To install from source, install [uv](https://docs.astral.sh/uv/),
+[Git LFS](https://git-lfs.com/), and Node.js 22.12 or newer, then run:
 
 ```bash
-uv venv --python python3.12 .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-uv sync --group dev
+git clone https://github.com/SaveTheRbtz/reachy_mini_conversation_app.git
+cd reachy_mini_conversation_app
+git lfs pull
+uv sync --frozen --python 3.12
 ```
 
-For a runtime-only environment, use `uv sync --no-dev`. Use `uv sync --frozen` to install exactly what is recorded in `uv.lock`.
-
-With pip:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-
-## Configuration
-
-Copy `.env.example` to `.env` and set an OpenAI API key:
-
-```env
-OPENAI_API_KEY=sk-...
-```
-
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | Required. Used for `gpt-live-1` and `gpt-6-astra`. It can also be saved from the web UI. |
-| `OPENAI_VOICE` | Default OpenAI Live voice when neither the active profile nor saved UI settings select one. Defaults to `gleam`, a natural feminine voice. |
-| `REACHY_MINI_CUSTOM_PROFILE` | Optional bundled profile directory name. Ignored after a startup profile has been saved in the UI. |
-| `REACHY_MINI_APP_TIMEOUT_MINUTES` | Minutes of inactivity before Reachy sleeps and the app stops. Defaults to `15`; set to `0` to disable. |
-
-The UI stores the API key in the managed app instance's `.env` file and never sends the current value back to the browser. Do not commit `.env`.
-
-The voice and delegation models are deliberately not configurable. This keeps one tested event protocol, audio format, prompt strategy, and tool-calling path.
+Copy [.env.example](.env.example) to `.env` and fill in `OPENAI_API_KEY`.
+Keep this file private. Windows support is experimental.
 
 ## Running the app
 
 Start the Reachy Mini daemon, then run:
 
 ```bash
-reachy-mini-conversation-app
+uv run --frozen reachy-mini-conversation-app --ui
 ```
 
-Add `--ui` to serve the browser interface at `http://127.0.0.1:7860/`.
+Open [localhost:7860](http://127.0.0.1:7860/) and start talking.
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--no-camera` | `False` | Disable camera capture. |
-| `--ui` | `False` | Serve the local browser UI. |
-| `--robot-name` | `None` | Connect to a named robot when several daemons share a subnet. |
-| `--debug` | `False` | Enable detailed diagnostic logging. |
+- **Conversation:** type a message, mute the microphone, or stop Reachy speaking.
+- **Personalities:** choose or create a personality and set its tool access.
+- **Settings:** choose a voice, set the startup personality, or enter an API key.
 
-### Diagnostics
+Changing the active personality or voice starts a fresh conversation. Reachy sleeps
+and the app stops after 15 minutes without conversation; set `REACHY_MINI_APP_TIMEOUT_MINUTES=0`
+in `.env` to disable this.
 
-Logs record SDK versions, the selected profile and voice, session connection/restart reasons, delegated response outcomes, tool execution, and audio failures. These diagnostics avoid full transcripts, tool arguments/results, memory snapshots, and image/audio payloads. Playback timing is an estimate of the software queues.
+Omit `--ui` to run without the browser. Add `--no-camera` to disable camera requests,
+`--robot-name NAME` to select a robot, or `--debug` for detailed logs.
+See [.env.example](.env.example) for other startup settings.
 
-Use `--debug` for additional detail. For a managed app on the robot, inspect the current boot with
-`journalctl -u reachy-mini-daemon -b --no-pager`. The SDK can wrap the app's stderr in an outer `WARNING`; use the app's
-inner log level to distinguish ordinary `INFO` messages from failures.
+For command-line installs, save your key in `.env`: a key entered in the web UI lasts
+only until the app stops. The Reachy Mini app launcher saves UI keys for later runs.
 
-## Tools
+## Memory and privacy
 
-The default profile enables the following catalog. Tools → Tool access can enable or disable entries for each personality.
+Conversation audio, text, and requested camera images go to OpenAI. Saved memories
+stay on your machine and are sent to OpenAI as conversation context. Memory is
+shared across personalities; Reachy does not identify speakers.
 
-| Tool | Action |
-|------|--------|
-| `camera` | Read the current SDK camera frame and return a resized WebP image directly to the Astra backend. |
-| `dance` / `stop_dance` | Start or stop a queued dance. |
-| `play_emotion` / `stop_emotion` | Start or stop a recorded emotion movement. |
-| `move_head` | Move Reachy's head to a named direction. |
-| `head_tracking` | Enable or disable face tracking. |
-| `sweep_look` | Sweep left, right, and return to center. |
-| `go_to_sleep` | Put Reachy to sleep and stop the app after an explicit request. |
-| `manage_memory` | Consolidate an explicit durable user statement into shared household memory. |
-| `web_search` | Search the public web for current information, weather, or local time. |
+Ask Reachy to remember, correct, or forget a preference. To erase all saved memory,
+stop the app and delete `memory.json` from its instance directory. For standalone
+runs, the default is `~/.local/share/reachy_mini_conversation_app/` (`XDG_DATA_HOME`
+overrides the data directory).
 
-Robot and memory function tools use explicit typed signatures and receive `ToolDependencies` through `RunContextWrapper`. Their failures return `{"error": ...}` so a tool problem does not tear down the Live session. Web search uses Live's hosted `web_search` tool on the Astra backend and respects the active profile's tool selection.
+## Troubleshooting
 
-### Memory
+If Reachy cannot connect, check that its daemon is running and that the robot is
+reachable on your network. If it connects but cannot talk, check your internet
+connection and API key. Run with `--debug` to see the cause.
 
-At startup, the app loads one `MemorySnapshot` into typed `ToolDependencies`. The Astra backend receives the current snapshot and prepares a complete typed replacement for `manage_memory` using the user's explicit request. The tool validates and persists that replacement without another model request.
-
-This is shared robot memory, not speaker identity: profiles do not select a memory store, and the app never infers who is speaking. The backend is instructed to retain only explicitly stated durable interests, preferences, goals, accomplishments, and conversation preferences; resolve corrections and forgetting semantically; and omit temporary activities and model-directed instructions.
-
-`memory.json` in the app instance directory (`~/.local/share/reachy_mini_conversation_app/` by default, or the desktop launcher's instance path) remains the local source of truth. A replacement is saved atomically only after its serialized size is at most 32 KiB; invalid arguments or disk failures leave the old snapshot unchanged. Memory is provided as untrusted background context to the backend and refreshed only when it changes. The voice model delegates recall questions instead of retaining an immutable memory snapshot; the current request and conversation always take precedence. To clear all shared memory, stop the app and delete the file.
-
-## Personalities
-
-Bundled profiles live under `profiles/`. A profile contains one schema-version-1 `profile.md` with TOML metadata and a Markdown instruction body:
-
-```markdown
-+++
-schema_version = 1
-voice = "gleam"
-greeting = "Greet me warmly in one sentence and vary the wording each time."
-hidden = false
-default_tools = [
-  "camera",
-  "sweep_look",
-]
-+++
-
-## Identity
-
-You are a concise, friendly robot guide.
-```
-
-`schema_version`, `default_tools`, and a non-empty instruction body are required. `voice`, `greeting`, and `hidden` are optional. A voice must be one of the OpenAI Live voices shown in Settings.
-
-The UI can create data-only user personalities. Managed instances store them under `user_personalities/`; standalone runs use `external_content/user_personalities/`. Per-profile tool overrides are stored in `profile_toolsets.json`. Remove `wait_for_user` from existing custom profiles and tool overrides; listening is handled by Live. Applying the active profile, voice, or tool set reconnects the one Live session.
-
-Startup profile and voice preferences are stored in `startup_settings.json` in the app instance directory, or under
-`external_content/` for standalone runs. A global voice override takes precedence over the selected profile's voice;
-clearing it restores the profile voice, falling back to the app default.
-
-Python tools are intentionally not dynamically loaded. Add a new tool as an Agents SDK `@function_tool` module under `src/reachy_mini_conversation_app/tools/`, register it in `tools/core_tools.py`, and add essential behavior tests.
+For an app running on the robot, read daemon logs with
+`journalctl -u reachy-mini-daemon -b --no-pager`.
 
 ## Development
 
-The browser UI is a Vue SPA under `frontend/src/`, with separate templates, strict TypeScript, and styles in single-file
-components. Vue Router handles Conversation, Personalities, and Settings, including direct links. Vue Query manages
-shared server reads; forms own their drafts and protect unsaved edits. Its API contract is
-[`proto/reachy/conversation/v1/api.proto`](proto/reachy/conversation/v1/api.proto).
-Buf generates Python models/service interfaces and TypeScript models/service descriptors. Connect serves unary calls
-and a conversation snapshot stream through the existing FastAPI app at `/rpc/reachy.conversation.v1.ConversationService/`.
-The frontend uses the generated Connect client. Vite builds the complete packaged UI into `src/reachy_mini_conversation_app/static/`.
-Edit components and `frontend/public/` assets, then rebuild; do not edit generated static files.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [testing guide](tests/README.md).
 
-The API follows Google AIP resource conventions for `conversation`, `settings`, `capabilities`, and `profiles/{profile}`.
-Updates use field masks; profile and settings writes save configuration, while `RestartConversation` explicitly applies it.
-An absent profile tool override inherits its defaults; an empty override disables all tools. Credentials are accepted by
-`SetSettingsApiKey` and never returned. Resource methods run over Connect's service/method URLs; no REST transcoding gateway
-is installed. Existing profile files retain their names; resource IDs distinguish bundled and user profiles with
-`builtin-` and `user-` prefixes. New user IDs use lowercase letters, digits, and hyphens; existing legacy IDs remain readable.
+The backend is Python; the browser UI is Vue and TypeScript. The
+[protobuf contract](proto/reachy/conversation/v1/api.proto) defines their Connect API.
+`uv sync` generates the API code and builds the UI. Commit source and lockfiles;
+generated code and browser assets are build outputs.
 
-The status stream sends an initial complete snapshot, changes, and a heartbeat at least every five seconds. The frontend
-reconnects this read-only stream after interruption without replaying commands. A shared server deadline bounds unary
-requests, including calls from clients that omit a deadline. Network finalization runs in the conversation loop after a
-restart is accepted, so the UI stays responsive while the old session closes.
+Run the app with `--ui`, then use `npm run dev` for frontend hot reload.
+After changing a schema, run `npm run generate` and restart the Python app.
+Use `uv build` to create installable packages; those packages need no Node.js to install.
 
-For development, install Node.js 22.12 or newer, then build and test:
+### Architecture
 
-```bash
-uv sync --frozen
-npm test
-npx playwright install chromium
-npm run test:e2e
-```
+<p align="center">
+  <img src="docs/assets/conversation_app_arch.svg" alt="Architecture Diagram" width="600"/>
+</p>
 
-`npm run dev` serves the SPA with hot reload and proxies `/rpc` to the app on port 7860.
-`npm run format` formats the frontend. `npm run check` checks formatting, protobuf schemas, templates, and TypeScript;
-`npm run build` builds the packaged UI. Development, checks, and builds regenerate the API automatically through npm's
-`predev`, `precheck`, and `prebuild` hooks. After editing a schema while the dev server is running, run `npm run generate`
-and restart the Python app. `uv sync` also rebuilds when its tracked source inputs change.
-Vue's type checker uses the maintained TypeScript 6 compiler API through the official `@typescript/typescript6` package.
-
-Commit schemas, handwritten source, `buf.lock`, `buf.gen.yaml`, `package-lock.json`, and `uv.lock`. Generated Python under
-`src/reachy_mini_conversation_app/gen/`, TypeScript under `frontend/src/gen/`, and the compiled `static/` directory are
-ignored build outputs. Keep editing SVG avatars under `frontend/public/avatars/`; their packaged copies are generated.
-Buf plugin versions and revisions are pinned. Hosted generated SDK packages are unnecessary for this single-repository
-API; schema and application changes can be built and tested together without publishing a separate contract package.
-
-`uv build` creates a source distribution and then builds its wheel. Both include the generated runtime files and SPA;
-building a wheel from the source distribution reuses those files. CI builds from a clean checkout, type-checks the generated
-contracts, and uploads installable distributions for seven days. GitHub releases attach both distributions. Hugging Face
-sync publishes the extracted source distribution so the Reachy SDK can install it without frontend build tools.
-
-The [testing guide](tests/README.md) defines coverage ownership, fixture and concurrency rules, framework choices,
-commands, and the research behind them. The default `pytest` suite checks application behavior and local SDK integration;
-`pytest -m packaging` runs clean-build and installed-package checks separately. Vitest runs frontend behavior and
-cross-language Connect tests; Playwright runs the packaged SPA against an isolated production Python backend.
-Only robot hardware and OpenAI I/O are simulated in those browser tests.
-
-Every pull request runs Frontend, Ruff, Type check, Pytest, and `uv.lock` checks. Python behavior and packaging run on
-Linux, macOS, and Windows. CI builds generated contracts from clean source and retains browser failure recordings for
-seven days. Paid OpenAI evaluations live under `tests/live/` and require explicit selection with `pytest -m live` and
-an `OPENAI_API_KEY`; they are excluded from the ordinary local and CI gates.
-
-Run the complete local gate before review:
-
-```bash
-ruff check . --fix
-ruff format .
-mypy --pretty --show-error-codes
-pytest
-pytest -m packaging
-npm test
-npm run test:e2e
-uv lock --check
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and [AGENTS.md](AGENTS.md) for repository-specific standards.
-
-## License
-
-Apache 2.0
+[Apache 2.0 license](LICENSE)
