@@ -9,6 +9,7 @@ from collections.abc import Callable
 import soxr
 import numpy as np
 import pytest
+from agents import ToolOutputImage
 from pydantic import TypeAdapter
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.live.server_event import ServerEvent
@@ -637,6 +638,28 @@ async def test_memory_changes_refresh_backend_before_continuation(changed: bool)
     worker = asyncio.create_task(conversation._run_tools())
     try:
         await asyncio.wait_for(conversation._tool_batches.join(), timeout=1)
+        transport.response.create.assert_awaited_once()
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_camera_image_is_a_native_tool_result() -> None:
+    """Return image content to the backend before continuing the visual response."""
+    conversation = _conversation()
+    transport = LiveTransport()
+    conversation._connection = transport
+    image = ToolOutputImage(image_url="data:image/jpeg;base64,aW1hZ2U=", detail="high")
+    conversation._tools = {"camera": SimpleNamespace(on_invoke_tool=AsyncMock(return_value=image))}
+    call = ResponseFunctionToolCall(name="camera", arguments="{}", call_id="camera", type="function_call")
+    conversation._tool_batches.put_nowait(BackendResponse("response", None, {call.call_id: call}))
+    worker = asyncio.create_task(conversation._run_tools())
+    try:
+        await asyncio.wait_for(conversation._tool_batches.join(), timeout=1)
+        output = transport.response.item.create.await_args.kwargs["item"]
+        assert output["call_id"] == "camera"
+        assert output["output"] == [{"type": "input_image", "image_url": image.image_url, "detail": "high"}]
         transport.response.create.assert_awaited_once()
     finally:
         worker.cancel()

@@ -46,6 +46,7 @@ class ObservedConversation(LiveConversation):
         super().__init__(dependencies, voice=get_default_voice(), output_sample_rate=REACHY_SAMPLE_RATE)
         self.transcript = ""
         self.input_transcript = ""
+        self.backend_transcript = ""
         self.backend_completions = 0
         self.hosted_searches = 0
         self.errors: list[str] = []
@@ -63,6 +64,10 @@ class ObservedConversation(LiveConversation):
             item = event.event.get("item")
             if isinstance(item, dict) and item.get("type") == "web_search_call":
                 self.hosted_searches += 1
+            elif isinstance(item, dict) and item.get("type") == "message":
+                for content in item.get("content", []):
+                    if content.get("type") == "output_text":
+                        self.backend_transcript += content["text"]
         elif event.type == "error":
             self.errors.append(event.error.code)
         elif event.type == "session.closed":
@@ -132,7 +137,8 @@ async def _live_session(
     except TimeoutError:
         pytest.fail(
             f"Live content timeout; input={conversation.input_transcript!r}; "
-            f"output={conversation.transcript!r}; backend_completions={conversation.backend_completions}"
+            f"output={conversation.transcript!r}; backend={conversation.backend_transcript!r}; "
+            f"backend_completions={conversation.backend_completions}"
         )
     finally:
         for worker in workers:
@@ -162,12 +168,32 @@ async def test_synthesized_speech_drives_production_audio_path(tmp_path: Path) -
 
 
 async def test_synthesized_speech_uses_camera_image(tmp_path: Path) -> None:
-    """Execute the production camera tool and speak a grounded visual answer."""
+    """Answer repeated visual questions through native images without filling backend history."""
     with Image.open(FIXTURES / "blue_chair.jpg") as image:
         camera_frame = np.asarray(image.convert("RGB"))[:, :, ::-1]
     async with _live_session(tmp_path, FIXTURES / "camera_request.pcm", camera_frame) as conversation:
         await _wait_for_content(conversation, lambda text: "blue" in text and "chair" in text)
         conversation.dependencies.reachy_mini.media.get_frame.assert_called_once_with()
+        for captures, (question, expected) in enumerate(
+            [
+                ("What color is the seat?", ("blue",)),
+                ("What material is the floor?", ("wood", "laminate")),
+                ("Does the chair have ordinary legs or wheels?", ("legs",)),
+                ("What main object do you see?", ("chair",)),
+            ],
+            start=2,
+        ):
+            conversation.transcript = ""
+            completed_before = conversation.backend_completions
+            await conversation.say(f"Take a fresh camera picture. {question} Answer briefly after inspecting it.")
+            await _wait_for_content(
+                conversation,
+                lambda text: (
+                    conversation.dependencies.reachy_mini.media.get_frame.call_count >= captures
+                    and conversation.backend_completions >= completed_before + 2
+                    and any(word in text for word in expected)
+                ),
+            )
 
 
 async def test_typed_request_executes_production_tool(tmp_path: Path) -> None:
@@ -178,6 +204,24 @@ async def test_typed_request_executes_production_tool(tmp_path: Path) -> None:
         )
         await _wait_for_content(conversation, lambda text: "track" in text or "follow" in text)
         conversation.dependencies.movement_manager.set_head_tracking.assert_called_once_with(True)
+
+
+async def test_camera_preserves_small_label_text(tmp_path: Path) -> None:
+    """Keep fine printed identifiers readable through the production image and speech path."""
+    with Image.open(FIXTURES / "camera_label.png") as image:
+        camera_frame = np.asarray(image.convert("RGB"))[:, :, ::-1]
+    async with _live_session(tmp_path, camera_frame=camera_frame) as conversation:
+        await conversation.say(
+            "Use your camera to read the printed MODEL, SERIAL, and LOT identifiers exactly. "
+            "Read all three briefly; do not guess characters that you cannot see."
+        )
+        await _wait_for_content(
+            conversation,
+            lambda text: all(
+                identifier in re.sub(r"[^a-z0-9]", "", text) for identifier in ("rx204", "h6p94721", "b7k2")
+            ),
+        )
+        conversation.dependencies.reachy_mini.media.get_frame.assert_called_once_with()
 
 
 async def test_hosted_search_returns_a_spoken_answer(tmp_path: Path) -> None:

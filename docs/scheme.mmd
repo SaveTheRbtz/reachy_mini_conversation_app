@@ -11,7 +11,6 @@ flowchart TB
     Live@{ label: "<span style='font-size:16px;font-weight:bold;'>OpenAI Live</span><br><span style='font-size:12px;color:#7b1fa2;'>gpt-live-1 continuous voice</span>" }
     Backend@{ label: "<span style='font-size:16px;font-weight:bold;'>Responses Backend</span><br><span style='font-size:12px;color:#7b1fa2;'>gpt-6-astra, low reasoning</span>" }
     Tools@{ label: "<span style='font-size:16px;font-weight:bold;'>Typed Tool Layer</span><br><span style='font-size:12px;color:#f9a825;'>Robot functions + memory persistence</span>" }
-    Vision@{ label: "<span style='font-size:16px;font-weight:bold;'>Camera Vision</span><br><span style='font-size:12px;color:#7b1fa2;'>gpt-6-astra, low reasoning, store=False</span>" }
     Search@{ label: "<span style='font-size:16px;font-weight:bold;'>OpenAI Web Search</span><br><span style='font-size:12px;color:#7b1fa2;'>Hosted by the Responses backend</span>" }
     Profiles@{ label: "<span style='font-size:16px;font-weight:bold;'>Profile State</span><br><span style='font-size:12px;color:#6a1b9a;'>Personality prompt + enabled tools</span>" }
     Context@{ label: "<span style='font-size:16px;font-weight:bold;'>Typed Run Context</span><br><span style='font-size:12px;color:#6a1b9a;'>ToolDependencies + MemorySnapshot</span>" }
@@ -23,9 +22,7 @@ flowchart TB
     App <-- audio and session events --> Live
     Live <-- delegation --> Backend
     Backend -- function calls --> Tools
-    Tools -- concise results --> Backend
-    Tools -- question + JPEG --> Vision
-    Vision -- visual description --> Tools
+    Tools -- results and resized images --> Backend
     Backend <--> Search
     Profiles --> App
     App -- owns --> Context
@@ -42,7 +39,6 @@ flowchart TB
     App:::uiStyle
     Live:::aiStyle
     Backend:::aiStyle
-    Vision:::aiStyle
     Search:::aiStyle
     Robot:::hardwareStyle
     Profiles:::toolStyle

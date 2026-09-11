@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 import soxr
 import numpy as np
-from agents import FunctionTool
+from agents import ItemHelpers, FunctionTool, ToolOutputImage
 from openai import AsyncOpenAI
 from pydantic import ValidationError
 from numpy.typing import NDArray
@@ -541,11 +541,9 @@ class LiveConversation:
                     self._backend_commands.add(event_id)
                     await connection.response.item.create(
                         event_id=event_id,
-                        item={
-                            "type": "function_call_output",
-                            "call_id": call.call_id,
-                            "output": output if isinstance(output, str) else json.dumps(output),
-                        },
+                        item=ItemHelpers.tool_call_output_item(
+                            call, output if isinstance(output, (str, ToolOutputImage)) else json.dumps(output)
+                        ),
                     )
                 if not batch.calls:
                     if self._responses or not self._tool_batches.empty():

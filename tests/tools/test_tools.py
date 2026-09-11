@@ -3,11 +3,12 @@ import base64
 import logging
 from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 from PIL import Image
+from agents import ToolOutputImage
 from agents.tool_context import ToolContext
 
 import reachy_mini_conversation_app.tools.camera as camera_module
@@ -17,34 +18,23 @@ from reachy_mini_conversation_app.tools.go_to_sleep import go_to_sleep
 from reachy_mini_conversation_app.tools.head_tracking import head_tracking
 
 
-@pytest.fixture
-def vision_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """Mock only the vision API while retaining production camera encoding."""
-    client = MagicMock()
-    client.__aenter__.return_value = client
-    client.responses.create = AsyncMock(return_value=SimpleNamespace(output_text="A visible object."))
-    monkeypatch.setattr(camera_module, "AsyncOpenAI", MagicMock(return_value=client))
-    monkeypatch.setattr(camera_module.config, "OPENAI_API_KEY", "test-key")
-    return client
-
-
 @pytest.mark.asyncio
-async def test_camera_inspects_current_frame_without_leaking_image_data(
-    vision_client: MagicMock, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("frame_shape, expected_size", [((480, 640), (512, 384)), ((24, 32), (32, 24))])
+async def test_camera_returns_current_resized_frame_without_logging_image_data(
+    caplog: pytest.LogCaptureFixture, frame_shape: tuple[int, int], expected_size: tuple[int, int]
 ) -> None:
-    """Encode each current BGR frame without leaking images into tool results or logs."""
-    red_frame = np.full((24, 32, 3), (0, 0, 255), dtype=np.uint8)
-    blue_frame = np.full((24, 32, 3), (255, 0, 0), dtype=np.uint8)
+    """Preserve each BGR frame's colors and aspect ratio without upscaling or logging it."""
+    red_frame = np.full((*frame_shape, 3), (0, 0, 255), dtype=np.uint8)
+    blue_frame = np.full((*frame_shape, 3), (255, 0, 0), dtype=np.uint8)
     red_frame.setflags(write=False)
     blue_frame.setflags(write=False)
     capture = MagicMock(side_effect=[red_frame, None, blue_frame])
     dependencies = SimpleNamespace(
         reachy_mini=SimpleNamespace(media=SimpleNamespace(get_frame=capture)), camera_enabled=True
     )
-    arguments = json.dumps({"question": "What is the user holding?"})
+    arguments = "{}"
     with caplog.at_level(logging.INFO, logger=camera_module.__name__):
         for index, expected_rgb in enumerate(((255, 0, 0), None, (0, 0, 255))):
-            vision_client.responses.create.reset_mock()
             result = await camera.on_invoke_tool(
                 ToolContext(
                     dependencies, tool_name="camera", tool_call_id=f"camera-{index}", tool_arguments=arguments
@@ -53,54 +43,78 @@ async def test_camera_inspects_current_frame_without_leaking_image_data(
             )
             if expected_rgb is None:
                 assert result == {"error": "No frame available"}
-                vision_client.responses.create.assert_not_awaited()
                 continue
-            assert result == {"description": "A visible object."}
-            request = vision_client.responses.create.await_args.kwargs
-            assert request["model"] == "gpt-6-astra"
-            assert request["reasoning"] == {"effort": "low"}
-            assert request["store"] is False
-            content = request["input"][0]["content"]
-            assert content[0] == {"type": "input_text", "text": "What is the user holding?"}
-            assert content[1]["detail"] == "high"
-            encoded = content[1]["image_url"].split(",", 1)[1]
+            assert isinstance(result, ToolOutputImage)
+            assert result.detail == "high"
+            assert result.image_url is not None
+            assert result.image_url.startswith("data:image/webp;base64,")
+            encoded = result.image_url.split(",", 1)[1]
             with Image.open(BytesIO(base64.b64decode(encoded))) as image:
-                assert image.format == "JPEG"
-                assert image.size == (32, 24)
+                assert image.format == "WEBP"
+                assert image.size == expected_size
                 np.testing.assert_allclose(np.asarray(image).mean(axis=(0, 1)), expected_rgb, atol=3)
             assert encoded not in caplog.text
-            assert "base64" not in str(result)
     assert capture.call_count == 3
-    assert "What is the user holding?" not in caplog.text
+    assert "base64" not in caplog.text
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["capture", "encode", "vision", "empty"])
+@pytest.mark.parametrize("failure", ["capture", "encode"])
 async def test_camera_reports_inspection_errors(
-    monkeypatch: pytest.MonkeyPatch, vision_client: MagicMock, caplog: pytest.LogCaptureFixture, failure: str
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure: str
 ) -> None:
-    """Return a tool error for capture, encoding, or vision failures."""
+    """Return a tool error for capture or encoding failures."""
     capture = MagicMock(return_value=np.zeros((24, 32, 3), dtype=np.uint8))
     if failure == "capture":
         capture.side_effect = RuntimeError("Camera disconnected")
-    elif failure == "encode":
-        monkeypatch.setattr(Image.Image, "save", MagicMock(side_effect=OSError("JPEG encoding failed")))
-    elif failure == "vision":
-        vision_client.responses.create.side_effect = RuntimeError("Vision unavailable")
     else:
-        vision_client.responses.create.return_value = SimpleNamespace(output_text=" ")
+        monkeypatch.setattr(Image.Image, "save", MagicMock(side_effect=OSError("Image encoding failed")))
     dependencies = SimpleNamespace(
         reachy_mini=SimpleNamespace(media=SimpleNamespace(get_frame=capture)), camera_enabled=True
     )
-    arguments = json.dumps({"question": "What is visible?"})
+    arguments = "{}"
     result = await camera.on_invoke_tool(
         ToolContext(dependencies, tool_name="camera", tool_call_id="camera-call", tool_arguments=arguments), arguments
     )
     assert "error" in result
     assert "Camera inspection failed" in result["error"]
     assert "Camera inspection failed" in caplog.text
-    if failure in {"capture", "encode"}:
-        vision_client.responses.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_camera_rejects_oversized_frame_without_sending_it(caplog: pytest.LogCaptureFixture) -> None:
+    """A detailed noisy image returns an error before it can exceed Live's input buffer."""
+    frame = np.random.default_rng(0).integers(0, 256, (512, 512, 3), dtype=np.uint8)
+    dependencies = SimpleNamespace(
+        reachy_mini=SimpleNamespace(media=SimpleNamespace(get_frame=MagicMock(return_value=frame))),
+        camera_enabled=True,
+    )
+    arguments = "{}"
+
+    result = await camera.on_invoke_tool(
+        ToolContext(dependencies, tool_name="camera", tool_call_id="camera-call", tool_arguments=arguments), arguments
+    )
+
+    assert result == {"error": "Camera image is too large to inspect"}
+    assert "Camera image is too large" in caplog.text
+    assert "base64" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_disabled_camera_does_not_capture() -> None:
+    """Respect camera availability without reading a frame."""
+    capture = MagicMock()
+    dependencies = SimpleNamespace(
+        reachy_mini=SimpleNamespace(media=SimpleNamespace(get_frame=capture)), camera_enabled=False
+    )
+    arguments = "{}"
+
+    result = await camera.on_invoke_tool(
+        ToolContext(dependencies, tool_name="camera", tool_call_id="camera-call", tool_arguments=arguments), arguments
+    )
+
+    assert result == {"error": "Camera is disabled"}
+    capture.assert_not_called()
 
 
 @pytest.mark.asyncio

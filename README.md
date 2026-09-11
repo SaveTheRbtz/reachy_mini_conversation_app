@@ -33,7 +33,7 @@ The implementation follows the [GPT-Live guide](https://developers.openai.com/ap
 
 The Python process owns a single Live session, audio conversion, robot media, and tool execution. The optional browser UI only manages local settings and displays session state.
 
-The voice model delegates reasoning to Astra through Responses. The app executes the active profile's enabled function tools; hosted web search runs directly in the backend. The camera tool sends a JPEG to a separate Astra vision request with low reasoning and `store=False`, then returns its concise description to the backend.
+The voice model delegates reasoning to Astra through Responses. The app executes the active profile's enabled function tools; hosted web search runs directly in the backend. The camera tool returns a native image for Astra to inspect in the same conversation. Frames keep their aspect ratio without upscaling, with a maximum dimension of 512 pixels and WebP quality 85. The backend uses `detail="high"` for [standard high-fidelity image understanding](https://developers.openai.com/api/docs/guides/images-vision#choose-an-image-detail-level). Encoded images above 20 KiB return a tool error to leave room within Live's backend input buffer.
 
 Audio uses persistent soxr resamplers between the robot and Live's 24 kHz PCM stream. Microphone capture and speaker playback run independently of backend work. Playback timing reflects software queues, not proof that sound was physically heard.
 
@@ -120,7 +120,7 @@ The default profile enables the following catalog. Tools → Tool access can ena
 
 | Tool | Action |
 |------|--------|
-| `camera` | Read the current SDK camera frame, encode it as JPEG with Pillow, and answer the visual question through Astra with `store=False`. |
+| `camera` | Read the current SDK camera frame and return a resized WebP image directly to the Astra backend. |
 | `dance` / `stop_dance` | Start or stop a queued dance. |
 | `play_emotion` / `stop_emotion` | Start or stop a recorded emotion movement. |
 | `move_head` | Move Reachy's head to a named direction. |
@@ -181,7 +181,7 @@ pytest tests/ -v
 The OpenAI integration tests exercise the production Live session, delegated robot tools, hosted search, memory
 preservation, correction and forgetting, homework guidance, PCM audio, and camera vision through paid Live and Responses calls. They replay
 checked-in 24 kHz mono PCM speech through Reachy's 16 kHz stereo input, check grounded spoken replies, and verify
-session finalization. The camera test includes a full JPEG that exceeds Live's backend input-history limit.
+session finalization. Camera tests ask five visual questions in one session and read small identifiers from a synthetic label.
 They are skipped by default; run them explicitly with an API key:
 
 ```bash
