@@ -43,15 +43,20 @@ reachy-mini-conversation-app = "reachy_mini_conversation_app.main:main"
 
 [tool.uv]
 exclude-newer = "7 days"
+# Basename globs also match refreshed dependencies under node_modules.
 cache-keys = [
   { file = "pyproject.toml" },
   { file = "hatch_build.py" },
   { file = "README.md" },
-  { file = "package*.json" },
-  { file = "buf.*" },
+  { file = "package.json" },
+  { file = "package-lock.json" },
+  { file = "buf.yaml" },
+  { file = "buf.gen.yaml" },
+  { file = "buf.lock" },
   { file = "proto/**/*.proto" },
   { file = "vite.config.ts" },
-  { file = "tsconfig*.json" },
+  { file = "tsconfig.json" },
+  { file = "tsconfig.test.json" },
   { file = "frontend/index.html" },
   { file = "frontend/src/*.ts" },
   { file = "frontend/src/*.vue" },
