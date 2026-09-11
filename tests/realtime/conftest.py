@@ -8,6 +8,7 @@ from agents import FunctionTool
 
 from tests.support.realtime import SESSION, LiveTransport, event, eventually, running_task, make_conversation
 import reachy_mini_conversation_app.realtime as realtime_module
+from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.realtime import LiveConversation
 
 
@@ -19,7 +20,7 @@ def live_transport(monkeypatch: pytest.MonkeyPatch) -> LiveTransport:
     client.live.connect.return_value = transport
     client.__aenter__.return_value = client
     monkeypatch.setattr(realtime_module, "AsyncOpenAI", MagicMock(return_value=client))
-    monkeypatch.setattr(realtime_module.config, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
     return transport
 
 

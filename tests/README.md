@@ -85,6 +85,7 @@ Keep pytest: fixtures, parametrization, introspected assertions, and pytest-asyn
 application. Vitest replaces the separate Node test runner because it uses the existing Vite transform
 pipeline and provides isolated modules/mocks and async fake timers. Type-check tests separately with
 `vue-tsc`; successful TypeScript transpilation alone is not a type check.
+Strict mypy checks Python application code, tests, and the build hook, both locally and in CI.
 
 Keep Playwright for native browser behavior and complete journeys. Locate controls by role and accessible
 name; test what the user sees. Keep tracing/screenshots/video on failure. The current UI cases need real

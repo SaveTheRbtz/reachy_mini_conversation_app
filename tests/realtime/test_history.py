@@ -8,7 +8,9 @@ import pytest
 from tests.support.realtime import SESSION, LiveTransport, event, eventually, running_task, make_conversation
 import reachy_mini_conversation_app.console as console_module
 import reachy_mini_conversation_app.realtime as realtime_module
+from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.console import LocalStream
+from reachy_mini_conversation_app.prompts import get_session_greeting_prompt
 from reachy_mini_conversation_app.realtime import LiveConversation
 
 
@@ -22,7 +24,7 @@ def transports(monkeypatch: pytest.MonkeyPatch) -> list[LiveTransport]:
     client.__aenter__.return_value = client
     client.live.connect.side_effect = transports
     monkeypatch.setattr(realtime_module, "AsyncOpenAI", MagicMock(return_value=client))
-    monkeypatch.setattr(realtime_module.config, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(console_module, "RETRY_DELAY_SECONDS", 0.0)
     return transports
 
@@ -58,7 +60,7 @@ async def test_reconnect_preserves_dialogue_through_a_failed_startup(transports:
         await eventually(lambda: recovered.session.start.await_count == 1 and stream.conversation.connected)
         assert stream.conversation.history == expected_history
         first.session.instructions.append.assert_any_await(
-            event_id="greeting", delegation_id=None, content=realtime_module.get_session_greeting_prompt()
+            event_id="greeting", delegation_id=None, content=get_session_greeting_prompt()
         )
         for transport in (failed_startup, recovered):
             seeded = transport.session.start.await_args.kwargs["session"]["input"]
@@ -163,11 +165,11 @@ def test_microphone_network_failure_reconnects_without_stopping_media(
     client.__aenter__.return_value = client
     client.live.connect.side_effect = [failed_transport, recovered_transport]
     monkeypatch.setattr(realtime_module, "AsyncOpenAI", MagicMock(return_value=client))
-    monkeypatch.setattr(realtime_module.config, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(realtime_module, "SEND_TIMEOUT_SECONDS", 0.1)
     monkeypatch.setattr(realtime_module, "SESSION_TIMEOUT_SECONDS", 0.1)
     monkeypatch.setattr(console_module, "RETRY_DELAY_SECONDS", 0.0)
-    monkeypatch.setattr(console_module.asyncio, "to_thread", AsyncMock())
+    monkeypatch.setattr(asyncio, "to_thread", AsyncMock())
     robot = MagicMock()
     robot.media.get_input_audio_samplerate.return_value = 24000
     robot.media.get_audio_sample.return_value = np.zeros(2400, dtype=np.float32)

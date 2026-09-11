@@ -7,7 +7,7 @@ import asyncio
 import logging
 from typing import TypeVar, Protocol
 from pathlib import Path
-from collections.abc import Callable, Awaitable, AsyncIterator
+from collections.abc import Callable, Awaitable, AsyncGenerator
 
 from protobuf.wkt import Empty, FieldMask
 from connectrpc.code import Code
@@ -230,7 +230,7 @@ class ConversationService(api_connect.ConversationService):
         self,
         request: messages.WatchConversationRequest,
         ctx: RequestContext[messages.WatchConversationRequest, messages.Conversation],
-    ) -> AsyncIterator[messages.Conversation]:
+    ) -> AsyncGenerator[messages.Conversation, None]:
         """Stream current state with periodic snapshots to detect stalled connections."""
         _require_name(request.name, "conversation")
         previous: messages.Conversation | None = None

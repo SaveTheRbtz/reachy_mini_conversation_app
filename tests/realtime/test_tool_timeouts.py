@@ -1,5 +1,6 @@
 import json
 import asyncio
+from unittest.mock import MagicMock
 
 import pytest
 from agents import FunctionTool
@@ -21,6 +22,8 @@ async def test_timed_out_tool_returns_error_and_unblocks_robot_tools(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Report a stalled tool and still execute the following robot request."""
+    movement_manager = conversation.dependencies.movement_manager
+    assert isinstance(movement_manager, MagicMock)
     pending_output: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
     async def stalled_tool(_context: ToolContext[ToolDependencies], _arguments: str) -> str:
@@ -47,7 +50,7 @@ async def test_timed_out_tool_returns_error_and_unblocks_robot_tools(
     assert "TimeoutError" in outputs[0]["error"]
     assert outputs[1] == {"status": "stopped dance and cleared queue"}
     assert pending_output.cancelled()
-    conversation.dependencies.movement_manager.clear_move_queue.assert_called_once_with()
+    movement_manager.clear_move_queue.assert_called_once_with()
     assert live_transport.response.create.await_count == 2
     assert "Tool failed: network_lookup" in caplog.text
     assert conversation.connected

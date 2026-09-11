@@ -37,7 +37,7 @@ def test_cancelled_emotion_load_stays_off_loop_and_is_reused_after_relaunch(
     )
 
     async def interrupted_call() -> None:
-        task = asyncio.create_task(emotion_module.play_emotion.on_invoke_tool(context, arguments))
+        task = asyncio.ensure_future(emotion_module.play_emotion.on_invoke_tool(context, arguments))
         try:
             async with asyncio.timeout(1):
                 while not started.is_set():
@@ -52,7 +52,7 @@ def test_cancelled_emotion_load_stays_off_loop_and_is_reused_after_relaunch(
             await asyncio.gather(task, return_exceptions=True)
 
     async def resumed_call() -> None:
-        task = asyncio.create_task(emotion_module.play_emotion.on_invoke_tool(context, arguments))
+        task = asyncio.ensure_future(emotion_module.play_emotion.on_invoke_tool(context, arguments))
         await asyncio.sleep(0)
         assert not task.done()
         release.set()
@@ -101,7 +101,7 @@ async def test_emotion_load_failure_is_logged_and_next_request_can_retry(
         tool_arguments=arguments,
     )
 
-    task = asyncio.create_task(emotion_module.play_emotion.on_invoke_tool(context, arguments))
+    task = asyncio.ensure_future(emotion_module.play_emotion.on_invoke_tool(context, arguments))
     try:
         async with asyncio.timeout(1):
             while not started.is_set():

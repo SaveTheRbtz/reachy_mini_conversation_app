@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -27,8 +28,10 @@ async def test_synthesized_speech_uses_camera_image(tmp_path: Path) -> None:
     with Image.open(FIXTURES / "blue_chair.jpg") as image:
         camera_frame = np.asarray(image.convert("RGB"))[:, :, ::-1]
     async with live_session(tmp_path, FIXTURES / "camera_request.pcm", camera_frame) as conversation:
+        robot = conversation.dependencies.reachy_mini
+        assert isinstance(robot, MagicMock)
         await wait_for_content(conversation, lambda text: "blue" in text and "chair" in text)
-        conversation.dependencies.reachy_mini.media.get_frame.assert_called_once_with()
+        robot.media.get_frame.assert_called_once_with()
         for captures, (question, expected) in enumerate(
             [
                 ("What color is the seat?", ("blue",)),
@@ -44,7 +47,7 @@ async def test_synthesized_speech_uses_camera_image(tmp_path: Path) -> None:
             await wait_for_content(
                 conversation,
                 lambda text: (
-                    conversation.dependencies.reachy_mini.media.get_frame.call_count >= captures
+                    robot.media.get_frame.call_count >= captures
                     and conversation.backend_completions >= completed_before + 2
                     and any(word in text for word in expected)
                 ),
@@ -54,11 +57,13 @@ async def test_synthesized_speech_uses_camera_image(tmp_path: Path) -> None:
 async def test_typed_request_executes_production_tool(tmp_path: Path) -> None:
     """Route typed input through the backend and preserve the robot tool result."""
     async with live_session(tmp_path) as conversation:
+        movement_manager = conversation.dependencies.movement_manager
+        assert isinstance(movement_manager, MagicMock)
         await conversation.say(
             "Enable head tracking by calling head_tracking with enabled=true. Confirm when enabled."
         )
         await wait_for_content(conversation, lambda text: "track" in text or "follow" in text)
-        conversation.dependencies.movement_manager.set_head_tracking.assert_called_once_with(True)
+        movement_manager.set_head_tracking.assert_called_once_with(True)
 
 
 async def test_camera_preserves_small_label_text(tmp_path: Path) -> None:
@@ -66,6 +71,8 @@ async def test_camera_preserves_small_label_text(tmp_path: Path) -> None:
     with Image.open(FIXTURES / "camera_label.png") as image:
         camera_frame = np.asarray(image.convert("RGB"))[:, :, ::-1]
     async with live_session(tmp_path, camera_frame=camera_frame) as conversation:
+        robot = conversation.dependencies.reachy_mini
+        assert isinstance(robot, MagicMock)
         await conversation.say(
             "Use your camera to read the printed MODEL, SERIAL, and LOT identifiers exactly. "
             "Read all three briefly; do not guess characters that you cannot see."
@@ -76,7 +83,7 @@ async def test_camera_preserves_small_label_text(tmp_path: Path) -> None:
                 identifier in re.sub(r"[^a-z0-9]", "", text) for identifier in ("rx204", "h6p94721", "b7k2")
             ),
         )
-        conversation.dependencies.reachy_mini.media.get_frame.assert_called_once_with()
+        robot.media.get_frame.assert_called_once_with()
 
 
 async def test_hosted_search_returns_a_spoken_answer(tmp_path: Path) -> None:

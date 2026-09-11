@@ -21,7 +21,7 @@ from reachy_mini_conversation_app.tools.types import ToolDependencies
 
 
 SESSION = {"id": "session_test", "expires_at": 1000, "model": "gpt-live-1", "status": "active"}
-EVENT_ADAPTER = TypeAdapter(ServerEvent)
+EVENT_ADAPTER: TypeAdapter[ServerEvent] = TypeAdapter(ServerEvent)
 
 
 class LiveTransport:

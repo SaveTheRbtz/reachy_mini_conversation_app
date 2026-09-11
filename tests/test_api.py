@@ -1,16 +1,19 @@
 """Contract behavior through the generated Connect ASGI application."""
 
 import asyncio
+from typing import cast
 from pathlib import Path
+from contextlib import aclosing
 from dataclasses import dataclass
 from unittest.mock import MagicMock
-from collections.abc import AsyncIterator
+from collections.abc import Mapping, AsyncIterator
 
 import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from connectrpc.code import Code
+from starlette.types import ASGIApp
 from connectrpc.errors import ConnectError
 
 import reachy_mini_conversation_app.api as api_module
@@ -82,7 +85,7 @@ class ApiFixture:
     service: ConversationService
     instance_path: Path
 
-    async def call(self, method: str, payload: dict[str, object]) -> httpx.Response:
+    async def call(self, method: str, payload: Mapping[str, object]) -> httpx.Response:
         """Send a ProtoJSON request through the real generated endpoint."""
         return await self.client.post(f"/rpc/reachy.conversation.v1.ConversationService/{method}", json=payload)
 
@@ -103,12 +106,14 @@ async def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[
     control = Control()
     service = ConversationService(control, instance)
     app = FastAPI()
-    app.mount("/rpc", ConversationServiceASGIApplication(service, interceptors=[RequestErrors(), RequestLimits()]))
+    connect_app = ConversationServiceASGIApplication(service, interceptors=[RequestErrors(), RequestLimits()])
+    # Connect uses typed ASGI events; Starlette still annotates them as mutable dictionaries.
+    app.mount("/rpc", cast(ASGIApp, connect_app))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
         yield ApiFixture(client, control, service, instance)
 
 
-async def _create(api: ApiFixture, profile_id: str = "user-guide") -> dict[str, object]:
+async def _create(api: ApiFixture, profile_id: str = "user-guide") -> httpx.Response:
     response = await api.call(
         "CreateProfile",
         {
@@ -121,13 +126,13 @@ async def _create(api: ApiFixture, profile_id: str = "user-guide") -> dict[str, 
         },
     )
     assert response.status_code == 200, response.text
-    return response.json()
+    return response
 
 
 @pytest.mark.asyncio
 async def test_profile_crud_preserves_inheritance_and_resource_identity(api: ApiFixture) -> None:
     """Create, read, partially update and delete the same generated resource."""
-    created = await _create(api)
+    created = (await _create(api)).json()
     assert created["name"] == "profiles/user-guide"
     assert created["displayName"] == "Guide"
     assert created.get("voice", "") == ""
@@ -385,16 +390,17 @@ async def test_legacy_names_and_pagination_round_trip(api: ApiFixture) -> None:
 @pytest.mark.asyncio
 async def test_watch_starts_with_complete_state_and_tracks_local_changes(api: ApiFixture) -> None:
     """The stream needs no separate snapshot fetch or event reconciliation."""
-    snapshots = api.service.watch_conversation(messages.WatchConversationRequest(name="conversation"), MagicMock())
-    first = await anext(snapshots)
-    assert first.connection_state == messages.Conversation.ConnectionState.DISCONNECTED
-    assert first.muted is False
-    api.control.muted = True
-    api.control.playing = True
-    second = await asyncio.wait_for(anext(snapshots), timeout=1)
-    assert second.muted is True
-    assert second.playing is True
-    await snapshots.aclose()
+    async with aclosing(
+        api.service.watch_conversation(messages.WatchConversationRequest(name="conversation"), MagicMock())
+    ) as snapshots:
+        first = await anext(snapshots)
+        assert first.connection_state == messages.Conversation.ConnectionState.DISCONNECTED
+        assert first.muted is False
+        api.control.muted = True
+        api.control.playing = True
+        second = await asyncio.wait_for(anext(snapshots), timeout=1)
+        assert second.muted is True
+        assert second.playing is True
 
 
 @pytest.mark.asyncio
@@ -467,7 +473,9 @@ async def test_server_deadline_cancels_stalled_command(api: ApiFixture, monkeypa
 @pytest.mark.asyncio
 async def test_watch_rejects_invalid_resource(api: ApiFixture) -> None:
     """A stream request validates its resource before sending any snapshots."""
-    snapshots = api.service.watch_conversation(messages.WatchConversationRequest(name="wrong"), MagicMock())
-    with pytest.raises(ConnectError) as error:
-        await anext(snapshots)
+    async with aclosing(
+        api.service.watch_conversation(messages.WatchConversationRequest(name="wrong"), MagicMock())
+    ) as snapshots:
+        with pytest.raises(ConnectError) as error:
+            await anext(snapshots)
     assert error.value.code == Code.INVALID_ARGUMENT

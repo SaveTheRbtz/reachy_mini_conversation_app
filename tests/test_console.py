@@ -1,25 +1,30 @@
+import os
 import re
+import time
 import base64
 import asyncio
 import logging
-from types import SimpleNamespace
 from pathlib import Path
 from threading import Thread
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, create_autospec
 
 import httpx
 import numpy as np
 import pytest
 from fastapi import FastAPI
+from numpy.typing import NDArray
+from websockets.asyncio.client import ClientConnection
+from openai.resources.live.live import AsyncLiveConnection
 from openai.types.live.output_audio_delta_event import OutputAudioDeltaEvent
 
 from tests.support.console import make_robot, make_conversation
 from tests.support.realtime import running_task
+from tests.support.realtime import make_conversation as make_live_conversation
 import reachy_mini_conversation_app.console as console_module
 import reachy_mini_conversation_app.realtime as realtime_module
-from reachy_mini_conversation_app.memory import MemorySnapshot
+from reachy_mini_conversation_app.config import OPENAI_API_KEY_ENV
 from reachy_mini_conversation_app.console import LocalStream
-from reachy_mini_conversation_app.realtime import PlaybackAudio, LiveConversation
+from reachy_mini_conversation_app.realtime import PlaybackAudio
 from reachy_mini_conversation_app.startup_settings import write_startup_settings
 from reachy_mini_conversation_app.gen.reachy.conversation.v1.api_pb import Conversation
 
@@ -69,16 +74,22 @@ async def test_spa_routes_keep_static_files_and_rpc_separate(tmp_path: Path) -> 
 def test_inactivity_survives_reconnect_and_ignores_playback_notifications(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only dialogue refreshes the sleep deadline, including after a session replacement."""
     now = 100.0
-    monkeypatch.setattr(console_module.time, "monotonic", lambda: now)
-    stream = LocalStream(make_robot(), conversation_factory=lambda voice: make_conversation())
-    activity = stream.conversation.set_activity_observer.call_args.args[0]
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    conversation = make_conversation()
+    stream = LocalStream(make_robot(), conversation_factory=lambda voice: conversation)
+    observer_call = conversation.set_activity_observer.call_args
+    assert observer_call is not None
+    activity = observer_call.args[0]
     now = 200.0
     activity("interaction")
     now = 300.0
     for reason in ("playback_started", "playback_stopped", "disconnected"):
         activity(reason)
-    stream._install_conversation(make_conversation())
-    activity = stream.conversation.set_activity_observer.call_args.args[0]
+    replacement = make_conversation()
+    stream._install_conversation(replacement)
+    observer_call = replacement.set_activity_observer.call_args
+    assert observer_call is not None
+    activity = observer_call.args[0]
     activity("connected")
     assert stream.seconds_since_activity() == 100.0
     now = 400.0
@@ -89,8 +100,11 @@ def test_inactivity_survives_reconnect_and_ignores_playback_notifications(monkey
 @pytest.mark.asyncio
 async def test_status_reports_microphone_and_playback_independently() -> None:
     """A muted microphone does not imply that the robot stopped playing audio."""
-    stream = LocalStream(make_robot(), conversation_factory=lambda voice: make_conversation())
-    activity = stream.conversation.set_activity_observer.call_args.args[0]
+    conversation = make_conversation()
+    stream = LocalStream(make_robot(), conversation_factory=lambda voice: conversation)
+    observer_call = conversation.set_activity_observer.call_args
+    assert observer_call is not None
+    activity = observer_call.args[0]
     await stream.set_muted(True)
     activity("playback_started")
     activity("interaction")
@@ -104,7 +118,7 @@ async def test_status_reports_microphone_and_playback_independently() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("voice_override, expected", [("coral", "coral"), (None, "shimmer")])
 async def test_restart_resolves_voice_without_waiting_for_remote_shutdown(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, voice_override: str | None, expected: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, voice_override: str | None, expected: str
 ) -> None:
     """Accept a restart locally using the same voice precedence as app startup."""
     conversation = make_conversation()
@@ -180,8 +194,9 @@ async def test_microphone_mute_logs_only_changes(caplog: pytest.LogCaptureFixtur
 @pytest.mark.asyncio
 async def test_restart_without_api_key_waits_instead_of_spinning(monkeypatch: pytest.MonkeyPatch) -> None:
     """A restart with no credential must leave the event loop responsive."""
-    stream = LocalStream(make_robot(), conversation_factory=lambda voice: make_conversation())
-    stream.conversation.connected = False
+    conversation = make_conversation()
+    conversation.connected = False
+    stream = LocalStream(make_robot(), conversation_factory=lambda voice: conversation)
     monkeypatch.setattr(console_module, "has_openai_api_key", lambda: False)
     await stream.request_restart("test")
 
@@ -195,14 +210,16 @@ async def test_restart_without_api_key_waits_instead_of_spinning(monkeypatch: py
 
 
 @pytest.mark.asyncio
-async def test_api_key_persistence_failure_keeps_runtime_credential(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_api_key_persistence_failure_keeps_runtime_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A failed credential save must not silently switch the running configuration."""
     stream = LocalStream(make_robot(), conversation_factory=lambda voice: make_conversation(), instance_path=tmp_path)
-    monkeypatch.setenv(console_module.OPENAI_API_KEY_ENV, "existing-key")
+    monkeypatch.setenv(OPENAI_API_KEY_ENV, "existing-key")
     (tmp_path / ".env").mkdir()
     with pytest.raises(OSError):
         await stream.set_api_key("replacement-key")
-    assert console_module.os.environ[console_module.OPENAI_API_KEY_ENV] == "existing-key"
+    assert os.environ[OPENAI_API_KEY_ENV] == "existing-key"
     with pytest.raises(ValueError, match="single line"):
         await stream.set_api_key("replacement-key\nUNRELATED_SETTING=1")
 
@@ -244,12 +261,7 @@ async def test_capture_recovery_restarts_media_before_bounded_live_interruption(
     stalled: bool,
 ) -> None:
     """Stop remote speech after local recovery without blocking on a stalled write."""
-    dependencies = SimpleNamespace(
-        instance_path=None,
-        memory=MemorySnapshot(memories=[]),
-        movement_manager=SimpleNamespace(set_speaking=MagicMock()),
-    )
-    conversation = LiveConversation(dependencies, voice="gleam", output_sample_rate=48_000)
+    conversation = make_live_conversation(output_rate=48_000)
     conversation.output_queue.put_nowait(PlaybackAudio(np.ones(48_000, dtype=np.float32)))
     robot = make_robot()
     recovered_audio = np.ones((2, 1_600), dtype=np.float32)
@@ -266,9 +278,9 @@ async def test_capture_recovery_restarts_media_before_bounded_live_interruption(
             await asyncio.Event().wait()
 
     instructions = AsyncMock(side_effect=interrupt_live)
-    conversation._connection = SimpleNamespace(
-        session=SimpleNamespace(instructions=SimpleNamespace(append=instructions))
-    )
+    connection = AsyncLiveConnection(create_autospec(ClientConnection, instance=True))
+    monkeypatch.setattr(connection.session.instructions, "append", instructions)
+    conversation._connection = connection
 
     async with running_task(stream.record_loop()):
         microphone_pcm = await asyncio.wait_for(conversation._microphone_queue.get(), timeout=1.0)
@@ -280,6 +292,7 @@ async def test_capture_recovery_restarts_media_before_bounded_live_interruption(
     assert conversation.output_queue.empty()
     assert np.max(np.frombuffer(microphone_pcm, dtype="<i2")) > 30_000
     instructions.assert_awaited_once()
+    assert instructions.await_args is not None
     assert "Stop speaking now and listen" in instructions.await_args.kwargs["content"]
     assert ("Failed to interrupt Live after microphone recovery" in caplog.text) is stalled
 
@@ -363,27 +376,20 @@ async def test_play_loop_pushes_chunks_without_waiting_for_playback_tracking() -
 
 
 @pytest.mark.asyncio
-async def test_interruption_discards_old_tracking_before_new_audio() -> None:
+async def test_interruption_discards_old_tracking_before_new_audio(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear queued playback and let fresh Live audio reach the player promptly."""
-    movement_manager = SimpleNamespace(set_speaking=MagicMock())
-    dependencies = SimpleNamespace(
-        instance_path=None,
-        send_image=None,
-        memory=MemorySnapshot(memories=[]),
-        movement_manager=movement_manager,
-    )
-    conversation = LiveConversation(dependencies, voice="gleam", output_sample_rate=48_000)
+    conversation = make_live_conversation(output_rate=48_000)
     instructions = AsyncMock()
-    conversation._connection = SimpleNamespace(
-        session=SimpleNamespace(instructions=SimpleNamespace(append=instructions))
-    )
+    connection = AsyncLiveConnection(create_autospec(ClientConnection, instance=True))
+    monkeypatch.setattr(connection.session.instructions, "append", instructions)
+    conversation._connection = connection
     for _ in range(2):
         conversation.output_queue.put_nowait(PlaybackAudio(np.ones(48_000, dtype=np.float32)))
     old_audio_pushed = asyncio.Event()
     fresh_audio_pushed = asyncio.Event()
     robot = make_robot()
 
-    def push_audio(_samples: np.ndarray) -> None:
+    def push_audio(_samples: NDArray[np.float32]) -> None:
         if robot.media.push_audio_sample.call_count == 2:
             old_audio_pushed.set()
         elif robot.media.push_audio_sample.call_count == 3:
@@ -441,7 +447,7 @@ def test_close_finalizes_while_session_receiver_is_alive(monkeypatch: pytest.Mon
     monkeypatch.setattr(stream, "play_loop", pending)
     monkeypatch.setattr(stream, "_acknowledge_playback_loop", pending)
     monkeypatch.setattr(console_module, "has_openai_api_key", lambda: True)
-    monkeypatch.setattr(console_module.asyncio, "to_thread", AsyncMock())
+    monkeypatch.setattr(asyncio, "to_thread", AsyncMock())
 
     stream.launch()
 

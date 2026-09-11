@@ -9,7 +9,12 @@ import pytest
 
 from tests.support.console import make_robot
 import reachy_mini_conversation_app.main as main_module
+from reachy_mini_conversation_app import app_lifecycle
+from reachy_mini_conversation_app.moves import MovementManager
+from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.memory import MemorySnapshot
+from reachy_mini_conversation_app.console import LocalStream
+from reachy_mini_conversation_app.realtime import LiveConversation
 
 
 @dataclass
@@ -27,17 +32,17 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> App:
     """Keep startup configuration real while replacing hardware and the foreground loop."""
     harness = App(
         make_robot(),
-        MagicMock(spec=main_module.MovementManager),
-        MagicMock(spec=main_module.LocalStream),
-        MagicMock(spec=main_module.LiveConversation),
+        MagicMock(spec=MovementManager),
+        MagicMock(spec=LocalStream),
+        MagicMock(spec=LiveConversation),
     )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("REACHY_MINI_CUSTOM_PROFILE", "curious_kids_ru")
-    monkeypatch.setattr(main_module.config, "REACHY_MINI_CUSTOM_PROFILE", None)
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", None)
     monkeypatch.setattr(
         main_module, "load_memory", lambda instance: MemorySnapshot(memories=["Private household memory"])
     )
-    monkeypatch.setattr(main_module.app_lifecycle, "wake_up_if_sleeping", MagicMock())
+    monkeypatch.setattr(app_lifecycle, "wake_up_if_sleeping", MagicMock())
     monkeypatch.setattr(main_module, "MovementManager", lambda **kwargs: harness.movement)
     monkeypatch.setattr(main_module, "LiveConversation", harness.conversation)
     monkeypatch.setattr(main_module, "resolve_app_timeout_minutes", lambda: None)
@@ -93,7 +98,7 @@ def test_sleep_still_stops_app_when_movement_fails(app: App, monkeypatch: pytest
     """A failed sleep motion cannot prevent local app shutdown or cause duplicate requests."""
     app.robot.goto_sleep.side_effect = RuntimeError("motor unavailable")
     request_stop = MagicMock(return_value=False)
-    monkeypatch.setattr(main_module.app_lifecycle, "request_stop_current_app", request_stop)
+    monkeypatch.setattr(app_lifecycle, "request_stop_current_app", request_stop)
     results: list[dict[str, object]] = []
 
     def request_sleep() -> None:
@@ -104,7 +109,9 @@ def test_sleep_still_stops_app_when_movement_fails(app: App, monkeypatch: pytest
     main_module.run(argparse.Namespace(debug=False, no_camera=True, ui=False), robot=app.robot)
 
     assert results[0]["status"] == "stop_requested"
-    assert "motor unavailable" in results[0]["error"]
+    error = results[0]["error"]
+    assert isinstance(error, str)
+    assert "motor unavailable" in error
     assert results[1]["status"] == "already_requested"
     request_stop.assert_called_once()
     app.stream.close.assert_called_once_with()

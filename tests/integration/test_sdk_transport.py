@@ -17,6 +17,7 @@ from openai.resources.live.live import AsyncLiveConnection
 
 from tests.support.realtime import make_conversation
 import reachy_mini_conversation_app.realtime as realtime_module
+from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.realtime import LiveConversation
 
 
@@ -54,7 +55,7 @@ async def sdk_transport(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[
     transport.close.side_effect = close
     websocket.connection_made(transport)
     monkeypatch.setattr("openai.lib._websocket._WebSocketConnect", AsyncMock(return_value=websocket))
-    monkeypatch.setattr(realtime_module.config, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(realtime_module, "SESSION_TIMEOUT_SECONDS", 0.1)
     try:
         yield websocket, transport

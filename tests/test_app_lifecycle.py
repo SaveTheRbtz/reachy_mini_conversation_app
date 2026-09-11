@@ -29,7 +29,7 @@ def test_stop_request_uses_connected_daemon_and_reports_failure(
             raise urllib.error.URLError("daemon unavailable")
         return response
 
-    monkeypatch.setattr(app_lifecycle.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     assert app_lifecycle.request_stop_current_app(robot, logging.getLogger(__name__)) is (not unavailable)
 
 
