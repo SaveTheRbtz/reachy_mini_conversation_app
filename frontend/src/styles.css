@@ -1,0 +1,371 @@
+:root {
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  color-scheme: light dark;
+  --background: light-dark(#f5f7f8, #13191c);
+  --surface: light-dark(#ffffff, #1c2428);
+  --soft: light-dark(#f0f3f4, #283338);
+  --text: light-dark(#202d34, #edf2f4);
+  --muted: light-dark(#586b75, #a5b6be);
+  --border: light-dark(#dce3e7, #36454d);
+  --accent: light-dark(#126b61, #a0ddd2);
+  --on-accent: light-dark(#ffffff, #143d36);
+  --tint: light-dark(#e8f3f0, #203d37);
+  --danger: light-dark(#ab3333, #ffb7b7);
+  --shadow: 0 4px 20px #10232d0a;
+  background: var(--background);
+  color: var(--text);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  line-height: 1.5;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+button,
+a {
+  touch-action: manipulation;
+}
+a {
+  color: var(--accent);
+  text-underline-offset: 0.2em;
+}
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+h1 {
+  font-size: 1.8rem;
+  line-height: 1.2;
+  letter-spacing: -0.035em;
+  margin-bottom: 0.45rem;
+}
+h2 {
+  font-size: 1.125rem;
+  letter-spacing: -0.015em;
+}
+h3 {
+  font-size: 1rem;
+}
+h1:focus,
+main:focus {
+  outline: none;
+}
+.muted {
+  color: var(--muted);
+}
+.skip-link {
+  position: fixed;
+  top: -5rem;
+  left: 1rem;
+  z-index: 100;
+  padding: 1rem;
+  background: var(--surface);
+  border-radius: 0.5rem;
+}
+.skip-link:focus {
+  top: 1rem;
+}
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  padding: 0.65rem max(1.5rem, calc((100vw - 1080px) / 2));
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.brand {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.brand img {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+}
+nav {
+  display: flex;
+  gap: 0.3rem;
+}
+nav a {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0.55rem 0.9rem;
+  border-radius: 0.5rem;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+nav a:hover,
+nav a.active {
+  background: var(--tint);
+  color: var(--accent);
+}
+.robot-status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.status-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: #bd963a;
+  flex-shrink: 0;
+}
+.status-dot.online {
+  background: #348276;
+}
+main {
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 3rem;
+  min-width: 0;
+}
+.page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+.page-heading p:last-child {
+  margin-bottom: 0;
+  font-size: 0.9rem;
+}
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  padding: 1.5rem;
+}
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.875rem;
+  font-weight: 600;
+  white-space: normal;
+}
+.button:hover:not(:disabled) {
+  background: var(--soft);
+}
+.button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.button.primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.button.quiet {
+  background: transparent;
+}
+.button.danger {
+  color: var(--danger);
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+}
+.field {
+  display: grid;
+  align-content: start;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.field small {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+input:not([type="checkbox"]),
+textarea,
+select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 400;
+  padding: 0.65rem 0.8rem;
+  min-height: 44px;
+}
+textarea {
+  resize: vertical;
+  line-height: 1.6;
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+input[type="checkbox"] {
+  width: 1.15rem;
+  height: 1.15rem;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+input:disabled,
+textarea:disabled,
+select:disabled {
+  background: var(--soft);
+  color: var(--muted);
+}
+fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+legend {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+.form-grid {
+  display: grid;
+  gap: 1.25rem;
+}
+.notice {
+  padding: 0.85rem 1rem;
+  border-radius: 0.5rem;
+  background: var(--tint);
+  font-size: 0.875rem;
+  margin: 1rem 0;
+  overflow-wrap: anywhere;
+}
+.notice p:last-child {
+  margin-bottom: 0;
+}
+.notice.error {
+  color: var(--danger);
+  background: light-dark(#fff1ed, #422b28);
+}
+.notice.success {
+  color: var(--accent);
+}
+.empty-state {
+  text-align: center;
+  padding: 2rem 1rem;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 0.35rem;
+  background: var(--tint);
+  padding: 0.2rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+@media (max-width: 760px) {
+  .app-header {
+    padding: 0.65rem 1rem 0;
+    gap: 0.5rem 1rem;
+    flex-wrap: wrap;
+  }
+  .brand {
+    font-size: 0.95rem;
+  }
+  .robot-status {
+    order: 1;
+    font-size: 0.75rem;
+  }
+  nav {
+    order: 2;
+    width: 100%;
+    gap: 0.25rem;
+    margin-bottom: 0.5rem;
+  }
+  nav a {
+    flex: 1;
+    padding: 0.5rem;
+    font-size: 0.85rem;
+  }
+  main {
+    padding: 1.5rem 1rem 2rem;
+  }
+  h1 {
+    font-size: 1.6rem;
+  }
+  .page-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .panel {
+    padding: 1.1rem;
+  }
+  input:not([type="checkbox"]),
+  textarea,
+  select {
+    font-size: 1rem;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -206,11 +206,6 @@ class LocalStream:
         ]
         app.mount("/static", StaticFiles(directory=str(static_directory)), name="static")
 
-        @app.get("/")
-        def root() -> FileResponse:
-            """Serve the app UI."""
-            return FileResponse(str(static_directory / "index.html"))
-
         @app.get("/favicon.ico")
         def favicon() -> Response:
             """Avoid a noisy missing favicon request."""
@@ -221,6 +216,12 @@ class LocalStream:
         )
         # Starlette and Connect annotate the same ASGI protocol with incompatible scope types.
         app.mount("/rpc", cast(ASGIApp, service))
+
+        @app.get("/{path:path}")
+        def frontend() -> FileResponse:
+            """Serve the SPA for browser routes, including direct navigation."""
+            return FileResponse(str(static_directory / "index.html"), headers={"Cache-Control": "no-cache"})
+
         self._settings_initialized = True
 
     async def _run_session_loop(self) -> None:

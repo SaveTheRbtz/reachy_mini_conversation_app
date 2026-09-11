@@ -1,12 +1,16 @@
+import re
 import base64
 import asyncio
 import logging
 from types import SimpleNamespace
+from pathlib import Path
 from threading import Thread
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import numpy as np
 import pytest
+from fastapi import FastAPI
 from openai.types.live.output_audio_delta_event import OutputAudioDeltaEvent
 
 import reachy_mini_conversation_app.console as console_module
@@ -49,6 +53,45 @@ def _robot() -> SimpleNamespace:
             stop_playing=MagicMock(),
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_spa_routes_keep_static_files_and_rpc_separate(tmp_path: Path) -> None:
+    """Browser routes load the packaged SPA without intercepting assets or API requests."""
+    application = FastAPI()
+
+    @application.get("/{path:path}")
+    def sdk_page() -> dict[str, str]:
+        return {"page": "SDK fallback"}
+
+    stream = LocalStream(
+        _robot(), conversation_factory=lambda voice: _conversation(), settings_app=application, instance_path=tmp_path
+    )
+    stream.init_settings_ui()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://test") as client:
+        root = await client.get("/")
+        assert root.status_code == 200
+        assert root.headers["cache-control"] == "no-cache"
+        assert '<div id="app"></div>' in root.text
+        for path in ("/settings", "/profiles/builtin-default"):
+            response = await client.get(path)
+            assert response.status_code == 200
+            assert response.content == root.content
+
+        assets = re.findall(r'(?:src|href)="(/static/[^\"]+)"', root.text)
+        assert assets
+        for asset in assets:
+            response = await client.get(asset)
+            assert response.status_code == 200
+            assert "text/html" not in response.headers["content-type"]
+        assert (await client.get("/static/missing.js")).status_code == 404
+
+        response = await client.post(
+            "/rpc/reachy.conversation.v1.ConversationService/GetConversation", json={"name": "conversation"}
+        )
+        assert response.status_code == 200
+        assert response.json()["name"] == "conversation"
+        assert (await client.post("/rpc/missing", json={})).status_code == 404
 
 
 def test_inactivity_survives_reconnect_and_ignores_playback_notifications(monkeypatch: pytest.MonkeyPatch) -> None:

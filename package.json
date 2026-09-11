@@ -3,22 +3,32 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node --experimental-strip-types frontend/build.ts",
-    "check": "buf lint && tsc --noEmit && tsc -p tsconfig.test.json",
+    "dev": "vite",
+    "build": "vite build",
+    "check": "prettier --check frontend vite.config.ts playwright.config.ts tsconfig*.json package.json && buf lint && vue-tsc --noEmit -p tsconfig.test.json",
     "check:generated": "node --experimental-strip-types frontend/check-generated.ts",
+    "generate": "buf generate",
     "test": "npm run check && npm run build && node --experimental-strip-types --test frontend/tests/*.test.ts",
-    "generate": "buf generate"
+    "test:e2e": "playwright test",
+    "format": "prettier --write frontend vite.config.ts playwright.config.ts tsconfig*.json package.json"
   },
   "devDependencies": {
     "@bufbuild/buf": "1.72.0",
     "@bufbuild/protoc-gen-es": "2.15.0",
+    "@playwright/test": "1.63.0",
     "@types/node": "22.20.2",
-    "esbuild": "0.28.2",
-    "typescript": "7.0.2"
+    "@vitejs/plugin-vue": "6.0.8",
+    "prettier": "3.9.6",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "vite": "8.3.0",
+    "vue-tsc": "3.3.11"
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.15.0",
     "@connectrpc/connect": "2.2.0",
-    "@connectrpc/connect-web": "2.2.0"
+    "@connectrpc/connect-web": "2.2.0",
+    "@tanstack/vue-query": "5.102.8",
+    "vue": "3.5.42",
+    "vue-router": "5.3.1"
   }
 }

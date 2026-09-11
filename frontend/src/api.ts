@@ -2,10 +2,13 @@ import { createClient, Code, ConnectError } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-web";
 import { ConversationService, type Conversation, type Profile } from "./gen/reachy/conversation/v1/api_pb.ts";
 
-export const api = createClient(ConversationService, createConnectTransport({
-  baseUrl: `${location.origin}/rpc`,
-  defaultTimeoutMs: 8000,
-}));
+export const api = createClient(
+  ConversationService,
+  createConnectTransport({
+    baseUrl: `${location.origin}/rpc`,
+    defaultTimeoutMs: 8000,
+  }),
+);
 
 export async function listProfiles(signal?: AbortSignal): Promise<Profile[]> {
   const profiles: Profile[] = [];
@@ -26,40 +29,21 @@ export async function watchConversation(
   while (!signal.aborted) {
     let receivedAt = 0;
     try {
-      for await (const conversation of api.watchConversation({ name: "conversation" }, { signal, timeoutMs: 30000 })) {
+      for await (const conversation of api.watchConversation(
+        { name: "conversation" },
+        { signal, timeoutMs: 30000 },
+      )) {
         receivedAt = Date.now();
         onSnapshot(conversation);
       }
+      if (!signal.aborted) throw new ConnectError("Conversation stream ended", Code.Unavailable);
     } catch (error) {
       if (signal.aborted) return;
       // Renew a healthy watch silently; the server sends a snapshot every five seconds.
-      if (ConnectError.from(error).code === Code.DeadlineExceeded && Date.now() - receivedAt < 10000) continue;
+      if (ConnectError.from(error).code === Code.DeadlineExceeded && Date.now() - receivedAt < 10000)
+        continue;
       console.warn("Conversation watch failed", error);
       onError(error);
-    }
-    await waitForRetry(signal);
-  }
-}
-
-export async function untilReady<Result>(
-  request: () => Promise<Result>,
-  signal: AbortSignal,
-  onRetry?: () => void,
-): Promise<Result> {
-  const deadline = Date.now() + 90000;
-  let notified = false;
-  for (;;) {
-    signal.throwIfAborted();
-    try {
-      return await request();
-    } catch (error) {
-      const code = ConnectError.from(error).code;
-      if (signal.aborted || Date.now() >= deadline ||
-          ![Code.Unavailable, Code.DeadlineExceeded, Code.Unknown].includes(code)) throw error;
-      if (!notified) {
-        notified = true;
-        onRetry?.();
-      }
     }
     await waitForRetry(signal);
   }

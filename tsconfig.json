@@ -1,9 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
+    "module": "ESNext",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": [],
+    "types": ["vite/client"],
     "rootDir": "frontend/src",
     "noEmit": true,
     "strict": true,
@@ -12,7 +12,9 @@
     "noUnusedParameters": true,
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "moduleResolution": "Bundler"
   },
-  "include": ["frontend/src/**/*.ts"]
+  "include": ["frontend/src/**/*.ts", "frontend/src/**/*.vue"],
+  "vueCompilerOptions": { "strictTemplates": true }
 }
