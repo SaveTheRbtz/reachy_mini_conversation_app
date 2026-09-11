@@ -77,9 +77,11 @@ test(
       assert.equal(muted.muted, true);
       assert.equal((await snapshots.next()).value?.muted, true);
       await stalled;
+      // Keep reading when canceled, as the production for-await loop does.
+      const canceledSnapshot = snapshots.next();
       controller.abort();
       await assert.rejects(
-        snapshots.next(),
+        canceledSnapshot,
         (error: unknown) => error instanceof ConnectError && error.code === Code.Canceled,
       );
       await fetch(`${origin}/__test/faults`, {
