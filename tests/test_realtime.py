@@ -10,13 +10,19 @@ import soxr
 import numpy as np
 import pytest
 from pydantic import TypeAdapter
+from openai.types.responses import ResponseFunctionToolCall
 from openai.types.live.server_event import ServerEvent
 
 import reachy_mini_conversation_app.console as console_module
 import reachy_mini_conversation_app.realtime as realtime_module
 from reachy_mini_conversation_app.memory import MemorySnapshot
 from reachy_mini_conversation_app.console import LocalStream
-from reachy_mini_conversation_app.realtime import PlaybackAudio, LiveConversation, StreamingAudioBridge
+from reachy_mini_conversation_app.realtime import (
+    PlaybackAudio,
+    BackendResponse,
+    LiveConversation,
+    StreamingAudioBridge,
+)
 
 
 def _conversation(output_rate: int = 24_000) -> LiveConversation:
@@ -396,6 +402,7 @@ async def test_function_batch_survives_empty_terminal_output_and_duplicate_event
         assert execute.await_count == 2
         assert transport.response.item.create.await_count == 2
         assert transport.response.create.await_count == 1
+        transport.session.update.assert_not_awaited()
         results = [entry.kwargs["item"] for entry in transport.response.item.create.await_args_list]
         assert {item["call_id"] for item in results} == {"call_1", "call_2"}
         assert all(item["type"] == "function_call_output" for item in results)
@@ -599,3 +606,38 @@ async def test_session_registers_hosted_search_only_when_enabled(
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", [False, True])
+async def test_memory_changes_refresh_backend_before_continuation(changed: bool) -> None:
+    """Send updated memory before continuing, with no update for unchanged snapshots."""
+    conversation = _conversation()
+    transport = LiveTransport()
+    conversation._connection = transport
+
+    async def remember(context: object, arguments: str) -> dict[str, str]:
+        if changed:
+            conversation.dependencies.memory = MemorySnapshot(memories=["We enjoy astronomy."])
+        return {"status": "updated" if changed else "unchanged"}
+
+    def continue_backend(**kwargs: object) -> None:
+        transport.response.item.create.assert_awaited_once()
+        assert transport.session.update.await_count == int(changed)
+        if changed:
+            instructions = transport.session.update.await_args.kwargs["session"]["delegation"]["responses"][
+                "instructions"
+            ]
+            assert "We enjoy astronomy." in instructions
+
+    conversation._tools = {"manage_memory": SimpleNamespace(on_invoke_tool=remember)}
+    transport.response.create.side_effect = continue_backend
+    call = ResponseFunctionToolCall(name="manage_memory", arguments="{}", call_id="remember", type="function_call")
+    conversation._tool_batches.put_nowait(BackendResponse("response", None, {call.call_id: call}))
+    worker = asyncio.create_task(conversation._run_tools())
+    try:
+        await asyncio.wait_for(conversation._tool_batches.join(), timeout=1)
+        transport.response.create.assert_awaited_once()
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)

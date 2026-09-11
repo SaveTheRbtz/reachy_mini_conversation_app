@@ -501,6 +501,7 @@ class LiveConversation:
                 connection = self._connection
                 if connection is None or self._closing:
                     continue
+                previous_memory = self.dependencies.memory.model_dump()
                 for call in batch.calls.values():
                     if call.call_id in self._handled_call_ids:
                         continue
@@ -553,19 +554,20 @@ class LiveConversation:
                         self._backend_busy = False
                         continue
                 self._pending_input = False
-                event_id = str(uuid4())
-                self._backend_commands.add(event_id)
-                await connection.session.update(
-                    event_id=event_id,
-                    session={
-                        "delegation": {
-                            "type": "responses",
-                            "responses": {
-                                "instructions": get_backend_instructions(self.dependencies),
+                if self.dependencies.memory.model_dump() != previous_memory:
+                    event_id = str(uuid4())
+                    self._backend_commands.add(event_id)
+                    await connection.session.update(
+                        event_id=event_id,
+                        session={
+                            "delegation": {
+                                "type": "responses",
+                                "responses": {
+                                    "instructions": get_backend_instructions(self.dependencies),
+                                },
                             },
                         },
-                    },
-                )
+                    )
                 event_id = str(uuid4())
                 self._backend_commands.add(event_id)
                 await connection.response.create(event_id=event_id)
