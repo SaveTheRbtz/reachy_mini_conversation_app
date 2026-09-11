@@ -8,9 +8,10 @@ from reachy_mini_conversation_app import config
 @pytest.mark.parametrize(
     ("raw_value", "expected"),
     [
-        ("", "marin"),
-        ("cedar", "cedar"),
-        ("unsupported", "marin"),
+        ("", "gleam"),
+        ("quartz", "quartz"),
+        ("gleam", "gleam"),
+        ("unsupported", "gleam"),
     ],
 )
 def test_get_default_voice(monkeypatch: pytest.MonkeyPatch, raw_value: str, expected: str) -> None:

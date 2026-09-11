@@ -1,7 +1,6 @@
 from typing import Protocol
 from pathlib import Path
 from dataclasses import dataclass
-from collections.abc import Callable, Awaitable
 
 from reachy_mini import ReachyMini
 from reachy_mini_conversation_app.moves import MovementManager
@@ -9,7 +8,6 @@ from reachy_mini_conversation_app.memory import MemorySnapshot
 
 
 ToolResult = dict[str, object]
-ImageSender = Callable[[str, bytes], Awaitable[None]]
 
 
 class SleepCallback(Protocol):
@@ -31,4 +29,3 @@ class ToolDependencies:
     camera_enabled: bool = True
     motion_duration_s: float = 1.0
     go_to_sleep: SleepCallback | None = None
-    send_image: ImageSender | None = None

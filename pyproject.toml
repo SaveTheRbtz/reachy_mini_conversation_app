@@ -12,8 +12,8 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi",
     "numpy",
-    "openai>=2.50.0",
-    "openai-agents>=0.19.4",
+    "openai[realtime]>=3.13.0",
+    "openai-agents>=0.22.2",
     "pillow>=12.3.0",
     "pydantic>=2.13.4",
     "python-dotenv",
@@ -45,6 +45,7 @@ exclude-newer = "7 days"
 "reachy-mini" = false
 "reachy-mini-dances-library" = false
 "openai-agents" = false
+"openai" = false
 
 [project.entry-points."reachy_mini_apps"]
 reachy_mini_conversation_app = "reachy_mini_conversation_app.main:ReachyMiniConversationApp"

@@ -1,55 +1,33 @@
+import json
 import base64
+import asyncio
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
+from collections.abc import Callable
 
 import soxr
 import numpy as np
 import pytest
-from pydantic import ValidationError
-from agents.realtime import (
-    RealtimeAudio,
-    RealtimeError,
-    RealtimeToolEnd,
-    RealtimeAudioEnd,
-    RealtimeEventInfo,
-    RealtimeToolStart,
-    RealtimeRawModelEvent,
-    RealtimeModelAudioEvent,
-    RealtimeAudioInterrupted,
-    RealtimeModelSendRawMessage,
-)
-from openai.types.realtime import RealtimeError as OpenAIRealtimeError
-from agents.realtime.model_events import RealtimeModelRawServerEvent, RealtimeModelTurnStartedEvent
+from pydantic import TypeAdapter
+from openai.types.live.server_event import ServerEvent
 
 import reachy_mini_conversation_app.realtime as realtime_module
 from reachy_mini_conversation_app.memory import MemorySnapshot
-from reachy_mini_conversation_app.realtime import PlaybackAudio, RealtimeConversation, StreamingAudioBridge
+from reachy_mini_conversation_app.realtime import PlaybackAudio, LiveConversation, StreamingAudioBridge
 
 
-def _conversation(output_rate: int = 48_000) -> RealtimeConversation:
+def _conversation(output_rate: int = 24_000) -> LiveConversation:
     dependencies = SimpleNamespace(
         instance_path=None,
-        send_image=None,
         memory=MemorySnapshot(memories=[]),
         movement_manager=SimpleNamespace(set_listening=MagicMock(), set_speaking=MagicMock()),
     )
-    return RealtimeConversation(dependencies, voice="marin", output_sample_rate=output_rate)
-
-
-def _audio_event(pcm16: bytes, *, item_id: str = "item", content_index: int = 0) -> RealtimeAudio:
-    return RealtimeAudio(
-        audio=RealtimeModelAudioEvent(
-            data=pcm16, response_id="response", item_id=item_id, content_index=content_index
-        ),
-        item_id=item_id,
-        content_index=content_index,
-        info=RealtimeEventInfo(context=MagicMock()),
-    )
+    return LiveConversation(dependencies, voice="marin", output_sample_rate=output_rate)
 
 
 def test_audio_bridge_converts_stereo_float_to_24khz_pcm16() -> None:
-    """Convert robot stereo input to the Realtime PCM format."""
+    """Convert robot stereo input to the Live PCM format."""
     bridge = StreamingAudioBridge(output_sample_rate=48_000)
     stereo = np.stack(
         (
@@ -66,14 +44,14 @@ def test_audio_bridge_converts_stereo_float_to_24khz_pcm16() -> None:
 
 
 def test_audio_bridge_converts_openai_pcm_to_robot_rate() -> None:
-    """Convert Realtime PCM output to the configured robot rate."""
+    """Convert Live PCM output to the configured robot rate."""
     bridge = StreamingAudioBridge(output_sample_rate=48_000)
-    pcm16 = np.arange(240, dtype="<i2").tobytes()
+    pcm16 = np.arange(2400, dtype="<i2").tobytes()
 
-    playback = bridge.pcm16_to_playback(pcm16, last=True)
+    playback = bridge.pcm16_to_playback(pcm16)
 
     assert playback.dtype == np.float32
-    assert playback.shape == (480,)
+    assert 0 < playback.size < 4800
 
 
 @pytest.mark.parametrize("output_rate", [16_000, 48_000])
@@ -82,18 +60,16 @@ def test_playback_resampling_matches_continuous_audio(output_rate: int, chunk_sa
     """Preserve waveform continuity and duration regardless of incoming chunk boundaries."""
     bridge = StreamingAudioBridge(output_sample_rate=output_rate)
     pcm16 = (np.sin(np.arange(24_000) * 2 * np.pi * 440 / 24_000) * 16_000).astype("<i2")
+    pcm16 = np.concatenate((pcm16, np.zeros(4096, dtype="<i2")))
     chunks = [
         bridge.pcm16_to_playback(pcm16[offset : offset + chunk_samples].tobytes())
         for offset in range(0, pcm16.size, chunk_samples)
     ]
-    flushed = bridge.pcm16_to_playback(b"", last=True)
-    assert flushed.size > 0
-    playback = np.concatenate((*chunks, flushed))
+    playback = np.concatenate(chunks)
     expected = soxr.resample(pcm16.astype(np.float32) / 32768.0, 24_000, output_rate)
 
-    assert playback.size == output_rate
-    np.testing.assert_allclose(playback, expected, atol=1e-6)
-    assert bridge.pcm16_to_playback(b"", last=True).size == 0
+    assert output_rate < playback.size <= expected.size
+    np.testing.assert_allclose(playback, expected[: playback.size], atol=1e-6)
 
 
 def test_microphone_resampling_stays_continuous_through_silence() -> None:
@@ -113,541 +89,392 @@ def test_microphone_resampling_stays_continuous_through_silence() -> None:
     np.testing.assert_allclose(actual, expected[: actual.size], atol=1)
 
 
-@pytest.mark.asyncio
-async def test_audio_event_preserves_playback_and_logs_once_per_item(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Preserve playback metadata and correlate first audio without per-chunk logs."""
-    conversation = _conversation()
-    now = 100.0
-    monkeypatch.setattr(realtime_module, "time", SimpleNamespace(monotonic=lambda: now))
-    pcm16 = np.arange(1200, dtype="<i2").tobytes()
-    event = RealtimeAudio(
-        audio=RealtimeModelAudioEvent(
-            data=pcm16,
-            response_id="response",
-            item_id="item",
-            content_index=2,
-        ),
-        item_id="item",
-        content_index=2,
-        info=RealtimeEventInfo(context=MagicMock()),
-    )
+class LiveTransport:
+    """Feed typed SDK events while recording the production client's writes."""
 
-    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
-        await conversation._handle_event(
-            RealtimeRawModelEvent(
-                data=RealtimeModelTurnStartedEvent(response_id="response"),
-                info=RealtimeEventInfo(context=MagicMock()),
-            )
+    def __init__(self) -> None:
+        """Initialize queued events and observable client commands."""
+        self.events: asyncio.Queue[ServerEvent] = asyncio.Queue()
+        self.session = SimpleNamespace(
+            start=AsyncMock(),
+            close=AsyncMock(),
+            update=AsyncMock(),
+            input_audio=SimpleNamespace(append=AsyncMock()),
+            instructions=SimpleNamespace(append=AsyncMock()),
         )
-        for item_id in ("item", "next-item"):
-            event.item_id = item_id
-            event.audio.item_id = item_id
-            now += 0.25
-            await conversation._handle_event(event)
-            await conversation._handle_event(event)
-            await conversation._handle_event(RealtimeAudioEnd(info=event.info, item_id=item_id, content_index=2))
-    queued = await conversation.emit()
+        self.response = SimpleNamespace(item=SimpleNamespace(create=AsyncMock()), create=AsyncMock())
+        self.close = AsyncMock()
 
-    assert queued is not None
-    assert queued.item_id == "item"
-    assert queued.content_index == 2
-    assert 0 < queued.samples.size < 2400
-    audio_logs = [message for message in caplog.messages if "Realtime assistant audio received" in message]
-    assert len(audio_logs) == 2
-    assert "item_id=item" in audio_logs[0]
-    assert "item_id=next-item" in audio_logs[1]
-    assert all("response_id=response" in message for message in audio_logs)
-    assert "elapsed_since_response_ms=250" in audio_logs[0]
-    assert "elapsed_since_response_ms=500" in audio_logs[1]
-    assert repr(pcm16) not in caplog.text
+    async def __aenter__(self) -> "LiveTransport":
+        """Open the test transport."""
+        return self
+
+    async def __aexit__(self, *args: object) -> bool:
+        """Release the test transport."""
+        return False
+
+    def __aiter__(self) -> "LiveTransport":
+        """Read events in their queued order."""
+        return self
+
+    async def recv(self) -> ServerEvent:
+        """Receive one typed server event."""
+        return await self.events.get()
+
+    async def __anext__(self) -> ServerEvent:
+        """Wait for the next server event."""
+        return await self.events.get()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("status", "reason", "error_code", "level"),
-    [
-        ("completed", None, None, logging.INFO),
-        ("cancelled", "turn_detected", None, logging.INFO),
-        ("failed", None, "server_error", logging.WARNING),
-        ("incomplete", "max_output_tokens", None, logging.WARNING),
-    ],
-)
-async def test_response_logs_outcome_timing_and_usage_without_content(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    status: str,
-    reason: str | None,
-    error_code: str | None,
-    level: int,
-) -> None:
-    """Distinguish API failures from successful turns and normal barge-in."""
-    conversation = _conversation()
-    now = 100.0
-    monkeypatch.setattr(realtime_module, "time", SimpleNamespace(monotonic=lambda: now))
-    response = {
-        "id": "resp_test",
+def _event(event_type: str, **fields: object) -> ServerEvent:
+    return TypeAdapter(ServerEvent).validate_python({"type": event_type, "event_id": "event_test", **fields})
+
+
+def _backend_event(event_type: str, **fields: object) -> ServerEvent:
+    return _event("response.event", delegation_id="delegation_test", event={"type": event_type, **fields})
+
+
+def _response(status: str) -> dict[str, object]:
+    return {
+        "id": "response_test",
+        "created_at": 1,
+        "model": "gpt-5.6-luna",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": False,
+        "tool_choice": "auto",
+        "tools": [],
         "status": status,
-        "status_details": {
-            "type": status,
-            "reason": reason,
-            "error": {"code": error_code, "type": "server_error"} if error_code else None,
-        },
-        "usage": {"input_tokens": 1234, "output_tokens": 99, "input_token_details": {"cached_tokens": 256}},
-        "output": [
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "PRIVATE RESPONSE CONTENT"}],
-            }
-        ],
     }
 
-    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
-        await conversation._handle_event(
-            RealtimeRawModelEvent(
-                data=RealtimeModelTurnStartedEvent(response_id="resp_test"),
-                info=RealtimeEventInfo(context=MagicMock()),
-            )
+
+async def _eventually(predicate: Callable[[], bool]) -> None:
+    async with asyncio.timeout(2):
+        while not predicate():
+            await asyncio.sleep(0)
+
+
+@pytest.fixture
+def live_transport(monkeypatch: pytest.MonkeyPatch) -> LiveTransport:
+    """Replace only the official SDK connection for session lifecycle tests."""
+    transport = LiveTransport()
+    client = MagicMock()
+    client.live.connect.return_value = transport
+    client.__aenter__.return_value = client
+    monkeypatch.setattr(realtime_module, "AsyncOpenAI", MagicMock(return_value=client))
+    monkeypatch.setattr(realtime_module.config, "OPENAI_API_KEY", "test-key")
+    return transport
+
+
+SESSION = {"id": "session_test", "expires_at": 1000, "model": "gpt-live-1", "status": "active"}
+
+
+@pytest.mark.asyncio
+async def test_session_gates_microphone_until_started_and_waits_for_final_usage(live_transport: LiveTransport) -> None:
+    """Start microphone transport only after readiness and receive graceful finalization."""
+    conversation = _conversation()
+    task = asyncio.create_task(conversation.start_up())
+    try:
+        await _eventually(lambda: live_transport.session.start.await_count == 1)
+        microphone = (24_000, np.zeros(2400, dtype=np.float32))
+        await conversation.receive(microphone)
+        assert not conversation.connected
+        live_transport.session.input_audio.append.assert_not_awaited()
+        await live_transport.events.put(_event("session.started", session=SESSION))
+        await _eventually(lambda: conversation.connected)
+        await conversation.receive(microphone)
+        live_transport.session.input_audio.append.assert_awaited_once()
+        config = live_transport.session.start.await_args.kwargs["session"]
+        assert config["model"] == "gpt-live-1"
+        assert config["audio"]["format"] == {"type": "audio/pcm", "rate": 24_000}
+        assert config["delegation"]["type"] == "responses"
+        assert config["delegation"]["responses"]["model"] == "gpt-6-astra"
+        assert config["delegation"]["responses"]["reasoning"] == {"effort": "low"}
+        assert "turn_detection" not in config["audio"]
+        closing = asyncio.create_task(conversation.shutdown())
+        await _eventually(lambda: live_transport.session.close.await_count == 1)
+        assert not closing.done()
+        await conversation.receive(microphone)
+        live_transport.session.input_audio.append.assert_awaited_once()
+        await live_transport.events.put(
+            _event("session.closed", session=SESSION, reason="close_requested", usage={"seconds": 1.2})
         )
-        now = 102.0
-        await conversation._handle_event(
-            RealtimeRawModelEvent(
-                data=RealtimeModelRawServerEvent(
-                    data={"type": "response.done", "event_id": "event_test", "response": response}
-                ),
-                info=RealtimeEventInfo(context=MagicMock()),
-            )
-        )
-
-    assert any(
-        "Realtime response started" in message and "response_id=resp_test" in message for message in caplog.messages
-    )
-    finished = [record for record in caplog.records if "Realtime response finished" in record.getMessage()]
-    assert len(finished) == 1
-    assert finished[0].levelno == level
-    message = finished[0].getMessage()
-    for field in (
-        "response_id=resp_test",
-        f"status={status}",
-        f"reason={reason}",
-        f"error_code={error_code}",
-        "duration_ms=2000",
-        "input_tokens=1234",
-        "cached_tokens=256",
-        "output_tokens=99",
-    ):
-        assert field in message
-    assert "PRIVATE RESPONSE CONTENT" not in caplog.text
+        await asyncio.wait_for(closing, timeout=2)
+        await asyncio.wait_for(task, timeout=2)
+        assert not conversation.connected
+        assert conversation.usage_seconds == 1.2
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_malformed_response_logging_does_not_leak_content_or_stop_playback(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Keep diagnostics from exposing validation inputs or breaking audio handling."""
+async def test_full_duplex_input_does_not_discard_speaking_audio() -> None:
+    """Keep microphone and playback flowing when input transcripts overlap speech."""
     conversation = _conversation()
-    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
-        await conversation._handle_event(
-            RealtimeRawModelEvent(
-                data=RealtimeModelRawServerEvent(
-                    data={"type": "response.done", "event_id": "event_test", "response": "PRIVATE INVALID RESPONSE"}
-                ),
-                info=RealtimeEventInfo(context=MagicMock()),
-            )
-        )
-        await conversation._handle_event(_audio_event(np.zeros(24, dtype="<i2").tobytes()))
-        await conversation._handle_event(
-            RealtimeAudioEnd(info=RealtimeEventInfo(context=MagicMock()), item_id="item", content_index=0)
-        )
-
-    assert sum(record.levelno == logging.WARNING for record in caplog.records) == 1
-    assert "PRIVATE INVALID RESPONSE" not in caplog.text
-    assert not any("Realtime response finished" in message for message in caplog.messages)
-    audio = await conversation.emit()
-    assert audio is not None
-    assert audio.samples.size == 48
-    assert await conversation.emit() is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("error", "fields"),
-    [
-        (
-            OpenAIRealtimeError(
-                type="invalid_request_error",
-                code="invalid_value",
-                param="audio",
-                event_id="event_client",
-                message="PRIVATE API ERROR MESSAGE",
-            ),
-            ("type=invalid_request_error", "code=invalid_value", "param=audio", "event_id=event_client"),
-        ),
-        (
-            ValidationError.from_exception_data(
-                "RealtimeResponse",
-                [{"type": "string_type", "loc": ("response",), "input": {"content": "PRIVATE VALIDATION INPUT"}}],
-            ),
-            ("string_type", "response"),
-        ),
-        (
-            {"message": "Tool call task failed: ConnectionError", "output": "PRIVATE SDK OUTPUT"},
-            ("Tool call task failed",),
-        ),
-        (ConnectionError("Connection closed by peer"), ("type=ConnectionError", "Connection closed by peer")),
-    ],
-)
-async def test_realtime_errors_log_support_metadata_without_private_content(
-    caplog: pytest.LogCaptureFixture,
-    error: object,
-    fields: tuple[str, ...],
-) -> None:
-    """Expose support identifiers without dumping API messages or validation inputs."""
-    conversation = _conversation()
-    await conversation._handle_event(RealtimeError(error=error, info=RealtimeEventInfo(context=MagicMock())))
-
-    assert len(caplog.records) == 1
-    assert caplog.records[0].levelno == logging.ERROR
-    assert all(field in caplog.text for field in fields)
-    assert "PRIVATE" not in caplog.text
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("output", "outcome", "level"),
-    [
-        ({"error": "No frame available"}, "error", logging.WARNING),
-        ("PRIVATE TOOL RESULT", "returned", logging.INFO),
-    ],
-)
-async def test_tool_logs_timing_and_outcome_without_arguments_or_result(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    output: dict[str, str] | str,
-    outcome: str,
-    level: int,
-) -> None:
-    """Measure tool calls without treating returned strings as proven successes."""
-    conversation = _conversation()
-    now = 100.0
-    monkeypatch.setattr(realtime_module, "time", SimpleNamespace(monotonic=lambda: now))
-    tool = MagicMock()
-    tool.name = "test_tool"
-    started = RealtimeToolStart(
-        agent=MagicMock(),
-        tool=tool,
-        arguments='{"query":"PRIVATE TOOL ARGUMENTS"}',
-        info=RealtimeEventInfo(context=MagicMock()),
-    )
-
-    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
-        await conversation._handle_event(started)
-        now = 102.0
-        await conversation._handle_event(
-            RealtimeToolEnd(
-                agent=started.agent,
-                tool=tool,
-                arguments=started.arguments,
-                output=output,
-                info=started.info,
-            )
-        )
-
-    assert any("Tool started: test_tool" in message for message in caplog.messages)
-    finished = [record for record in caplog.records if "Tool finished: test_tool" in record.getMessage()]
-    assert len(finished) == 1
-    assert finished[0].levelno == level
-    assert f"outcome={outcome}" in finished[0].getMessage()
-    assert "duration_ms=2000" in finished[0].getMessage()
-    if isinstance(output, dict):
-        assert "error=No frame available" in finished[0].getMessage()
-    assert "PRIVATE" not in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_microphone_forwarding_logs_success_and_throttles_delay_warnings(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Expose successful but slow microphone forwarding without flooding logs."""
-    conversation = _conversation()
-    activity_observer = MagicMock()
-    conversation.set_activity_observer(activity_observer)
-    last_activity_time = conversation.last_activity_time
-    session = SimpleNamespace(send_audio=AsyncMock())
-    conversation._session = session
-    monkeypatch.setattr(realtime_module, "REALTIME_AUDIO_SEND_STALL_SECONDS", 0.0)
-    frame = (24_000, np.ones(240, dtype=np.float32))
-
-    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
-        await conversation.receive(frame)
-        await conversation.receive(frame)
-
-    assert sum("Realtime microphone forwarding started" in message for message in caplog.messages) == 1
-    assert sum("Realtime microphone forwarding delayed" in message for message in caplog.messages) == 1
-    assert session.send_audio.await_count == 2
-    assert conversation.last_activity_time == last_activity_time
-    activity_observer.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_failed_microphone_send_does_not_log_forwarding_success(caplog: pytest.LogCaptureFixture) -> None:
-    """Report microphone forwarding only after sending a frame succeeds."""
-    conversation = _conversation()
-    send_audio = AsyncMock(side_effect=ConnectionError("Connection closed"))
-    conversation._session = SimpleNamespace(send_audio=send_audio)
-    frame = (24_000, np.ones(240, dtype=np.float32))
-
-    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
-        with pytest.raises(ConnectionError):
-            await conversation.receive(frame)
-        assert not any("Realtime microphone forwarding started" in message for message in caplog.messages)
-        send_audio.side_effect = None
-        await conversation.receive(frame)
-
-    assert sum("Realtime microphone forwarding started" in message for message in caplog.messages) == 1
-
-
-@pytest.mark.asyncio
-async def test_vad_speech_transitions_mark_user_activity(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Log server-detected speech and reset inactivity without logging microphone frames."""
-    conversation = _conversation()
-    activity_observer = MagicMock()
-    conversation.set_activity_observer(activity_observer)
-    now = 100.0
-    monkeypatch.setattr(realtime_module, "time", SimpleNamespace(monotonic=lambda: now))
-
-    with caplog.at_level(logging.INFO, logger=realtime_module.__name__):
-        for event_type, now in (
-            ("input_audio_buffer.speech_started", 100.0),
-            ("input_audio_buffer.speech_stopped", 200.0),
-        ):
-            await conversation._handle_event(
-                RealtimeRawModelEvent(
-                    data=RealtimeModelRawServerEvent(data={"type": event_type, "item_id": "user_item"}),
-                    info=RealtimeEventInfo(context=MagicMock()),
-                )
-            )
-
-    assert conversation.last_activity_time == 200.0
-    assert activity_observer.call_args_list == [call("listening"), call("thinking")]
-    assert sum("item_id=user_item" in message for message in caplog.messages) == 2
-
-
-@pytest.mark.asyncio
-async def test_audio_end_defers_listening_until_playback_tracking() -> None:
-    """Flush short speech before the listening marker, accounting for only emitted samples."""
-    conversation = _conversation(output_rate=16_000)
-    movement_manager = conversation.dependencies.movement_manager
-    pcm16 = np.ones(240, dtype="<i2").tobytes()
-    await conversation._handle_event(_audio_event(pcm16))
+    transport = LiveTransport()
+    conversation._connection = transport
+    pcm = np.arange(2400, dtype="<i2")
+    await conversation._handle_event(_event("session.output_audio.delta", delta=base64.b64encode(pcm).decode()))
+    await conversation._handle_event(_event("session.input_transcript.delta", delta="yes", start_ms=10, end_ms=20))
+    await conversation.receive((24_000, np.zeros(2400, dtype=np.float32)))
+    transport.session.input_audio.append.assert_awaited_once()
+    playback = await asyncio.wait_for(conversation.emit(), timeout=1)
+    np.testing.assert_allclose(playback.samples, pcm.astype(np.float32) / 32768)
     assert conversation.output_queue.empty()
-    assert conversation._playback_tracker.get_state()["elapsed_ms"] is None
-
-    await conversation._handle_event(
-        RealtimeAudioEnd(
-            info=RealtimeEventInfo(context=MagicMock()),
-            item_id="item",
-            content_index=0,
-        )
-    )
-
-    audio = await conversation.emit()
-    assert audio is not None
-    assert (audio.item_id, audio.content_index) == ("item", 0)
-    assert audio.samples.size == 160
-    movement_manager.set_speaking.assert_not_called()
-    assert await conversation.emit() is None
-    movement_manager.set_speaking.assert_not_called()
-    movement_manager.set_listening.assert_not_called()
-
-    await conversation.acknowledge_after_playback(audio)
-    assert conversation._playback_tracker.get_state()["elapsed_ms"] == pytest.approx(10.0)
-    conversation.acknowledge_playback_end()
-
-    assert movement_manager.set_speaking.call_args_list == [call(True), call(False)]
-    assert movement_manager.set_listening.call_args_list == [call(False), call(True)]
 
 
 @pytest.mark.asyncio
-async def test_playback_accounting_excludes_resampler_delay_until_flushed() -> None:
-    """Acknowledge emitted audio duration, adding the buffered tail only after it plays."""
-    conversation = _conversation(output_rate=16_000)
-    event = _audio_event(np.ones(4800, dtype="<i2").tobytes())
-    await conversation._handle_event(event)
-    audio = await conversation.emit()
-    assert audio is not None
-    assert 0 < audio.samples.size < 3200
-    assert conversation._playback_tracker.get_state()["elapsed_ms"] is None
-
-    await conversation.acknowledge_after_playback(audio)
-    assert conversation._playback_tracker.get_state()["elapsed_ms"] == pytest.approx(audio.samples.size / 16)
-
-    await conversation._handle_event(RealtimeAudioEnd(info=event.info, item_id="item", content_index=0))
-    tail = await conversation.emit()
-    assert tail is not None
-    assert audio.samples.size + tail.samples.size == 3200
-    await conversation.acknowledge_after_playback(tail)
-    assert conversation._playback_tracker.get_state()["elapsed_ms"] == pytest.approx(200.0)
-    assert await conversation.emit() is None
-
-
-@pytest.mark.asyncio
-async def test_interruption_clears_pending_audio_and_robot_player() -> None:
-    """Clear queued and device audio immediately on interruption."""
+async def test_explicit_interrupt_clears_playback_and_redirects_live() -> None:
+    """Flush received and device audio only for an explicit application interruption."""
     conversation = _conversation()
+    conversation._connection = LiveTransport()
     clear_player = MagicMock()
     conversation.set_clear_player(clear_player)
-    conversation.output_queue.put_nowait(PlaybackAudio("item", 0, np.zeros(1, dtype=np.float32)))
-
-    await conversation._handle_event(
-        RealtimeAudioInterrupted(
-            info=RealtimeEventInfo(context=MagicMock()),
-            item_id="item",
-            content_index=0,
-        )
-    )
-
+    conversation.output_queue.put_nowait(PlaybackAudio(samples=np.ones(2400, dtype=np.float32)))
+    await conversation.interrupt()
     assert conversation.output_queue.empty()
     clear_player.assert_called_once_with()
+    conversation._connection.session.instructions.append.assert_awaited_once()
+    assert "stop" in conversation._connection.session.instructions.append.await_args.kwargs["content"].lower()
 
 
 @pytest.mark.asyncio
-async def test_interruption_discards_resampler_tail_and_stale_audio_end() -> None:
-    """Never mix an interrupted item's buffered samples into its replacement."""
-    conversation = _conversation(output_rate=16_000)
-    old_audio = _audio_event(np.full(240, 16_000, dtype="<i2").tobytes(), item_id="old")
-    await conversation._handle_event(old_audio)
-    assert conversation.output_queue.empty()
-    await conversation.interrupt()
-    for item_id in ("new", "next"):
-        await conversation._handle_event(_audio_event(np.zeros(240, dtype="<i2").tobytes(), item_id=item_id))
-        await conversation._handle_event(RealtimeAudioEnd(info=old_audio.info, item_id="old", content_index=0))
-        assert conversation.output_queue.empty()
-        await conversation._handle_event(RealtimeAudioEnd(info=old_audio.info, item_id=item_id, content_index=0))
-        audio = await conversation.emit()
-        assert audio is not None
-        assert audio.item_id == item_id
-        assert audio.samples.size == 160
-        assert not audio.samples.any()
-        assert await conversation.emit() is None
-
-
-@pytest.mark.asyncio
-async def test_camera_image_is_sent_as_one_raw_conversation_item() -> None:
-    """Send camera text and image in one ordered conversation item."""
+async def test_typed_text_is_backend_input() -> None:
+    """Route typed user text to Responses instead of voice instructions."""
     conversation = _conversation()
-    model = SimpleNamespace(send_event=MagicMock())
-
-    async def send_event(event: RealtimeModelSendRawMessage) -> None:
-        model.event = event
-
-    model.send_event = send_event
-    conversation._session = SimpleNamespace(model=model)
-    jpeg = b"jpeg bytes"
-
-    await conversation._send_image("What is this?", jpeg)
-
-    event = model.event
-    assert isinstance(event, RealtimeModelSendRawMessage)
-    assert event.message["type"] == "conversation.item.create"
-    item = event.message["other_data"]["item"]
-    assert item["content"][0] == {"type": "input_text", "text": "What is this?"}
-    assert item["content"][1]["image_url"] == (f"data:image/jpeg;base64,{base64.b64encode(jpeg).decode('ascii')}")
+    conversation._connection = LiveTransport()
+    await conversation.say("My order number is A0042.")
+    items = [entry.kwargs["item"] for entry in conversation._connection.response.item.create.await_args_list]
+    assert items[0]["role"] == "user"
+    assert items[0]["content"] == [{"type": "input_text", "text": "My order number is A0042."}]
+    instructions = conversation._connection.session.instructions.append.await_args.kwargs
+    assert instructions["delegation_id"] is None
+    assert "Answer that request aloud" in instructions["content"]
+    assert "A0042" not in instructions["content"]
 
 
 @pytest.mark.asyncio
-async def test_session_uses_fixed_model_sdk_defaults_and_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Build the session with fixed model defaults and server-side truncation."""
-    captured = {}
-
-    class FakeSession:
-        def __init__(self) -> None:
-            self.messages = []
-            self.model = SimpleNamespace(send_event=AsyncMock())
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return False
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            raise StopAsyncIteration
-
-        async def send_message(self, message) -> None:
-            self.messages.append(message)
-
-    fake_session = FakeSession()
-
-    class CapturingRunner:
-        def __init__(self, agent, *, config) -> None:
-            captured["agent"] = agent
-            captured["run_config"] = config
-
-        async def run(self, *, context, model_config):
-            captured["context"] = context
-            captured["model_config"] = model_config
-            return fake_session
-
-    movement_manager = SimpleNamespace(set_listening=MagicMock(), set_speaking=MagicMock())
-    dependencies = SimpleNamespace(
-        instance_path=None,
-        send_image=None,
-        memory=MemorySnapshot(memories=[]),
-        movement_manager=movement_manager,
-    )
-    conversation = RealtimeConversation(dependencies, voice="marin", output_sample_rate=48_000)
-    monkeypatch.setattr(realtime_module.config, "OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(realtime_module, "RealtimeRunner", CapturingRunner)
-
-    await conversation.start_up()
-
-    model_settings = captured["model_config"]["initial_model_settings"]
-    audio_input = model_settings["audio"]["input"]
-    assert model_settings["model_name"] == "gpt-realtime-2.1"
-    assert model_settings["output_modalities"] == ["audio"]
-    assert audio_input["turn_detection"]["type"] == "semantic_vad"
-    assert audio_input["turn_detection"]["create_response"] is True
-    assert audio_input["turn_detection"]["interrupt_response"] is True
-    assert "transcription" not in audio_input
-    assert model_settings["parallel_tool_calls"] is False
-    assert captured["run_config"]["async_tool_calls"] is False
-    assert captured["run_config"]["model_settings"]["reasoning"] == {"effort": "low"}
-    assert fake_session.messages
-    context_config = fake_session.model.send_event.await_args_list[0].args[0]
-    assert isinstance(context_config, RealtimeModelSendRawMessage)
-    truncation = context_config.message["other_data"]["session"]["truncation"]
-    assert truncation == {
-        "type": "retention_ratio",
-        "retention_ratio": 0.8,
-        "token_limits": {"post_instructions": 64_000},
-    }
-    movement_manager.set_listening.assert_called_once_with(False)
-    movement_manager.set_speaking.assert_called_once_with(False)
-
-
-@pytest.mark.asyncio
-async def test_playback_is_reported_only_when_not_interrupted() -> None:
-    """Skip playback accounting for audio cleared by an interruption."""
+async def test_function_batch_survives_empty_terminal_output_and_duplicate_events() -> None:
+    """Execute each collected call once and continue only after all function results."""
     conversation = _conversation()
-    tracker = MagicMock()
-    conversation._playback_tracker = tracker
-    audio = PlaybackAudio("item", 1, np.zeros(1, dtype=np.float32))
+    transport = LiveTransport()
+    conversation._connection = transport
 
-    await conversation.acknowledge_after_playback(audio)
-    tracker.on_play_ms.assert_called_once_with("item", 1, 1000 / 48_000)
+    def assert_complete_batch(**kwargs: object) -> None:
+        assert transport.response.item.create.await_count == 2
 
-    tracker.reset_mock()
-    conversation._playback_interrupted.set()
-    await conversation.acknowledge_after_playback(audio)
-    tracker.on_play_ms.assert_not_called()
+    transport.response.create.side_effect = assert_complete_batch
+    execute = AsyncMock(return_value={"status": "following"})
+    conversation._tools = {"head_tracking": SimpleNamespace(name="head_tracking", on_invoke_tool=execute)}
+    worker = asyncio.create_task(conversation._run_tools())
+    try:
+        await conversation._handle_event(
+            _backend_event("response.created", sequence_number=0, response=_response("in_progress"))
+        )
+        for call_id in ("call_1", "call_2", "call_1"):
+            await conversation._handle_event(
+                _backend_event(
+                    "response.output_item.done",
+                    sequence_number=1,
+                    output_index=0,
+                    item={
+                        "id": f"item_{call_id}",
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": "head_tracking",
+                        "arguments": '{"enabled":true}',
+                        "status": "completed",
+                    },
+                )
+            )
+        transport.response.create.assert_not_awaited()
+        completed = _backend_event("response.completed", sequence_number=2, response=_response("completed"))
+        await conversation._handle_event(completed)
+        await _eventually(lambda: transport.response.create.await_count == 1)
+        await conversation._handle_event(completed)
+        await asyncio.sleep(0)
+        assert execute.await_count == 2
+        assert transport.response.item.create.await_count == 2
+        assert transport.response.create.await_count == 1
+        results = [entry.kwargs["item"] for entry in transport.response.item.create.await_args_list]
+        assert {item["call_id"] for item in results} == {"call_1", "call_2"}
+        assert all(item["type"] == "function_call_output" for item in results)
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_live_error_logs_metadata_without_private_content(caplog: pytest.LogCaptureFixture) -> None:
+    """Keep session errors diagnosable without logging server-echoed private content."""
+    conversation = _conversation()
+    with caplog.at_level(logging.WARNING):
+        await conversation._handle_event(
+            _event(
+                "error", error={"type": "invalid_request_error", "code": "invalid_value", "message": "private text"}
+            )
+        )
+    assert "invalid_value" in caplog.text
+    assert "private text" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_available", [True, False])
+async def test_failed_tool_returns_error_and_continues_backend(tool_available: bool) -> None:
+    """Return failures for unavailable or failing tools without ending the voice stream."""
+    conversation = _conversation()
+    transport = LiveTransport()
+    conversation._connection = transport
+    if tool_available:
+        conversation._tools = {
+            "head_tracking": SimpleNamespace(
+                name="head_tracking", on_invoke_tool=AsyncMock(side_effect=ValueError("invalid arguments"))
+            )
+        }
+    worker = asyncio.create_task(conversation._run_tools())
+    try:
+        await conversation._handle_event(
+            _backend_event("response.created", sequence_number=0, response=_response("in_progress"))
+        )
+        await conversation._handle_event(
+            _backend_event(
+                "response.output_item.done",
+                sequence_number=1,
+                output_index=0,
+                item={
+                    "id": "item_failed",
+                    "type": "function_call",
+                    "call_id": "call_failed",
+                    "name": "head_tracking",
+                    "arguments": "{}",
+                    "status": "completed",
+                },
+            )
+        )
+        await conversation._handle_event(
+            _backend_event("response.completed", sequence_number=2, response=_response("completed"))
+        )
+        await _eventually(lambda: transport.response.create.await_count == 1)
+        result = transport.response.item.create.await_args.kwargs["item"]
+        assert result["call_id"] == "call_failed"
+        assert "error" in json.loads(result["output"])
+        assert conversation.connected
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+def test_stereo_pcm16_microphone_preserves_amplitude() -> None:
+    """Normalize integer stereo input before averaging channels."""
+    bridge = StreamingAudioBridge(output_sample_rate=24_000)
+    stereo = np.full((2400, 2), 8192, dtype=np.int16)
+    converted = np.frombuffer(bridge.microphone_to_pcm16(24_000, stereo), dtype="<i2")
+    np.testing.assert_allclose(converted, 8192, atol=1)
+
+
+@pytest.mark.asyncio
+async def test_typed_input_waits_for_dequeued_tool_result_before_continuation() -> None:
+    """Queue typed corrections while a tool executes without starting a competing response."""
+    conversation = _conversation()
+    transport = LiveTransport()
+    conversation._connection = transport
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    async def execute(context: object, arguments: str) -> dict[str, str]:
+        tool_started.set()
+        await release_tool.wait()
+        return {"status": "following"}
+
+    conversation._tools = {"head_tracking": SimpleNamespace(name="head_tracking", on_invoke_tool=execute)}
+    worker = asyncio.create_task(conversation._run_tools())
+    try:
+        await conversation._handle_event(
+            _backend_event("response.created", sequence_number=0, response=_response("in_progress"))
+        )
+        await conversation.say("Please keep the movement gentle.")
+        transport.response.create.assert_not_awaited()
+        await conversation._handle_event(
+            _backend_event(
+                "response.output_item.done",
+                sequence_number=1,
+                output_index=0,
+                item={
+                    "id": "item_slow",
+                    "type": "function_call",
+                    "call_id": "call_slow",
+                    "name": "head_tracking",
+                    "arguments": '{"enabled":true}',
+                    "status": "completed",
+                },
+            )
+        )
+        await conversation._handle_event(
+            _backend_event("response.completed", sequence_number=2, response=_response("completed"))
+        )
+        await asyncio.wait_for(tool_started.wait(), timeout=1)
+        assert conversation._tool_batches.empty()
+        await conversation.say("Actually, stop tracking after this.")
+        transport.response.create.assert_not_awaited()
+        release_tool.set()
+        await asyncio.wait_for(conversation._tool_batches.join(), timeout=1)
+        transport.response.create.assert_awaited_once()
+        submitted = [entry.kwargs["item"] for entry in transport.response.item.create.await_args_list]
+        assert [item["type"] for item in submitted] == ["message", "message", "function_call_output"]
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_transport_while_waiting_for_startup(live_transport: LiveTransport) -> None:
+    """Close a connecting session without sending commands before it is ready."""
+    conversation = _conversation()
+    task = asyncio.create_task(conversation.start_up())
+    try:
+        await _eventually(lambda: live_transport.session.start.await_count == 1)
+        await conversation.shutdown()
+        live_transport.close.assert_awaited_once()
+        live_transport.session.close.assert_not_awaited()
+        live_transport.session.instructions.append.assert_not_awaited()
+        assert not conversation.connected
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_rejected_backend_command_stops_session_without_leaking_input(caplog: pytest.LogCaptureFixture) -> None:
+    """Abort a rejected backend command so a busy session cannot silently stall."""
+    conversation = _conversation()
+    conversation._connection = LiveTransport()
+    await conversation.say("private typed request")
+    command_id = conversation._connection.response.create.await_args.kwargs["event_id"]
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="Live backend command rejected"):
+        await conversation._handle_event(
+            _event(
+                "error",
+                error={
+                    "type": "invalid_request_error",
+                    "code": "response_input_buffer_full",
+                    "message": "private typed request",
+                    "client_event_id": command_id,
+                },
+            )
+        )
+    assert not conversation.connected
+    assert "response_input_buffer_full" in caplog.text
+    assert "private typed request" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_malformed_backend_event_fails_without_logging_private_content(caplog: pytest.LogCaptureFixture) -> None:
+    """Reject invalid protocol input without echoing nested private content."""
+    conversation = _conversation()
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="Invalid Live backend event"):
+        await conversation._handle_event(
+            _backend_event("response.created", sequence_number=0, response={"instructions": "private instructions"})
+        )
+    assert "Invalid Live backend event" in caplog.text
+    assert "private instructions" not in caplog.text

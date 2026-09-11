@@ -266,7 +266,7 @@ class PersonalityOps:
         return {"ok": True, "status": status, "startup": persisted_choice}
 
     async def voices(self) -> list[str]:
-        """List voices available for OpenAI Realtime."""
+        """List voices available for OpenAI Live."""
         if self._get_loop() is None:
             return get_available_voices()
 
@@ -288,7 +288,7 @@ class PersonalityOps:
             return {"voice": get_default_voice()}
 
     async def apply_voice(self, voice: str) -> dict[str, object]:
-        """Change the current voice by restarting the Realtime session."""
+        """Change the current voice by restarting the Live session."""
         selected_voice = voice.strip()
         if not selected_voice:
             raise RouteError("missing_voice")

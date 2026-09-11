@@ -9,23 +9,36 @@ from dotenv import find_dotenv, load_dotenv
 
 logger = logging.getLogger(__name__)
 
-REALTIME_MODEL: Final = "gpt-realtime-2.1"
+LIVE_MODEL: Final = "gpt-live-1"
+DELEGATION_MODEL: Final = "gpt-6-astra"
 OPENAI_API_KEY_ENV: Final = "OPENAI_API_KEY"
 OPENAI_VOICE_ENV: Final = "OPENAI_VOICE"
 APP_TIMEOUT_MINUTES_ENV: Final = "REACHY_MINI_APP_TIMEOUT_MINUTES"
 DEFAULT_APP_TIMEOUT_MINUTES: Final = 15.0
-DEFAULT_VOICE: Final = "marin"
+DEFAULT_VOICE: Final = "gleam"
 OPENAI_VOICES: Final = (
     "alloy",
     "ash",
     "ballad",
+    "beacon",
+    "bossa",
     "cedar",
+    "cinder",
     "coral",
+    "delta",
     "echo",
+    "gleam",
     "marin",
+    "meridian",
+    "quartz",
+    "ripple",
     "sage",
     "shimmer",
+    "stone",
+    "tempo",
     "verse",
+    "vesper",
+    "willow",
 )
 LOCKED_PROFILE: Final[str | None] = None
 USER_PERSONALITIES_DIRNAME: Final = "user_personalities"
@@ -96,12 +109,12 @@ def has_openai_api_key() -> bool:
 
 
 def get_available_voices() -> list[str]:
-    """Return supported OpenAI Realtime voices."""
+    """Return supported OpenAI Live voices."""
     return list(OPENAI_VOICES)
 
 
 def get_default_voice() -> str:
-    """Return the default OpenAI Realtime voice."""
+    """Return the default OpenAI Live voice."""
     configured_voice = os.getenv(OPENAI_VOICE_ENV, "").strip()
     if not configured_voice:
         return DEFAULT_VOICE

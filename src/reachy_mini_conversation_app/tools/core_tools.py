@@ -1,7 +1,7 @@
 from typing import Final, TypedDict
 from collections.abc import Iterable
 
-from agents import Tool, FunctionTool
+from agents import FunctionTool
 
 from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.tools.dance import dance
@@ -17,7 +17,6 @@ from reachy_mini_conversation_app.tools.play_emotion import play_emotion
 from reachy_mini_conversation_app.tools.stop_emotion import stop_emotion
 from reachy_mini_conversation_app.tools.head_tracking import head_tracking
 from reachy_mini_conversation_app.tools.manage_memory import manage_memory
-from reachy_mini_conversation_app.tools.wait_for_user import wait_for_user
 
 
 class ToolCatalogEntry(TypedDict):
@@ -38,7 +37,6 @@ TOOLS: Final[tuple[FunctionTool, ...]] = (
     stop_dance,
     stop_emotion,
     sweep_look,
-    wait_for_user,
     web_search,
 )
 TOOLS_BY_NAME: Final = {tool.name: tool for tool in TOOLS}
@@ -49,7 +47,7 @@ def selected_tool_names(instance_path: str | None = None) -> list[str]:
     return read_profile_tool_names(config.REACHY_MINI_CUSTOM_PROFILE, instance_path)
 
 
-def get_function_tools(enabled_tool_names: Iterable[str]) -> list[Tool]:
+def get_function_tools(enabled_tool_names: Iterable[str]) -> list[FunctionTool]:
     """Resolve enabled tools from the static registry."""
     enabled = set(enabled_tool_names)
     unknown = enabled - set(TOOLS_BY_NAME)
