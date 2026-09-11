@@ -116,8 +116,8 @@ key into a command example or committed configuration. Live failures need invest
 model, service, and application; they are not deterministic PR gates.
 
 Before review, run Ruff checks/formatting, strict mypy, `pytest`, `pytest -m packaging`, `npm test`,
-`npm run test:e2e`, and `uv lock --check`. CI keeps Python behavior and packaging as separate steps on
-Linux, macOS, and Windows, and runs frontend checks, unit, cross-language, and browser tests on Linux.
+`npm run test:e2e`, and `uv lock --check`. CI runs on Linux, with separate Python behavior and packaging
+steps alongside frontend checks, unit, cross-language, and browser tests.
 The distribution build also proves code generation from clean source. No emotions dataset is downloaded
 for ordinary tests. Browser failure artifacts are retained for seven days.
 
