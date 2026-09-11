@@ -5,6 +5,12 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "frontend/**"
+      - "proto/**"
+      - "buf.*"
+      - "package*.json"
+      - "vite.config.ts"
+      - "hatch_build.py"
       - ".github/workflows/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -33,6 +39,12 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
+          lfs: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
 
       - name: Install uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2

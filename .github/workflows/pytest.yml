@@ -5,6 +5,12 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "frontend/**"
+      - "proto/**"
+      - "buf.*"
+      - "package*.json"
+      - "vite.config.ts"
+      - "hatch_build.py"
       - ".github/workflows/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -57,6 +63,11 @@ jobs:
           # are read by tests/test_personality_avatars.py; without this the
           # checkout leaves LFS pointer files and the "<svg" assertions fail.
           lfs: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
