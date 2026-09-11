@@ -2,19 +2,19 @@ import os
 import time
 import asyncio
 import logging
-from typing import TypeVar, TypeAlias
+from typing import TypeVar, TypeAlias, cast
 from pathlib import Path
 from collections.abc import Callable, Coroutine
 
 import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, Response
+from starlette.types import ASGIApp
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from reachy_mini import ReachyMini
-from reachy_mini.io.jsonrpc import JsonRpcError
-from reachy_mini.apps.jsonrpc_server import JsonRpcServer
+from reachy_mini_conversation_app.api import RequestErrors, RequestLimits, ConversationService, profile_resource_name
 from reachy_mini_conversation_app.config import (
     LIVE_MODEL,
     OPENAI_API_KEY_ENV,
@@ -22,16 +22,17 @@ from reachy_mini_conversation_app.config import (
     get_default_voice,
     has_openai_api_key,
     set_custom_profile,
-    get_available_voices,
     refresh_runtime_config_from_env,
 )
-from reachy_mini_conversation_app.prompts import get_profile_instructions
+from reachy_mini_conversation_app.prompts import get_session_voice, get_profile_instructions
 from reachy_mini_conversation_app.realtime import PlaybackAudio, LiveConversation
-from reachy_mini_conversation_app.startup_settings import read_startup_settings, write_startup_settings
+from reachy_mini_conversation_app.startup_settings import read_startup_settings
 from reachy_mini_conversation_app.tools.core_tools import get_function_tools, selected_tool_names
-from reachy_mini_conversation_app.personality_routes import build_personality_ops, register_personality_methods
-from reachy_mini_conversation_app.profile_tool_routes import register_profile_tool_methods
 from reachy_mini_conversation_app.audio.startup_config import apply_audio_startup_config
+from reachy_mini_conversation_app.gen.reachy.conversation.v1.api_pb import Conversation
+from reachy_mini_conversation_app.gen.reachy.conversation.v1.api_connect import (
+    ConversationServiceASGIApplication,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -68,12 +69,11 @@ class LocalStream:
         self._playback_acknowledgements: asyncio.Queue[PlaybackAcknowledgement] = asyncio.Queue()
         self._tasks: list[asyncio.Task[None]] = []
         self._asyncio_loop: asyncio.AbstractEventLoop | None = None
-        self._rpc: JsonRpcServer | None = None
         self._settings_initialized = False
         self._mic_muted = False
         self._playing = False
         self._last_interaction_at = time.monotonic()
-        self._connection_state = "not_started"
+        self._connection_state = Conversation.ConnectionState.NOT_STARTED
         self._connection_error: str | None = None
         self._install_conversation(self._conversation)
 
@@ -100,8 +100,8 @@ class LocalStream:
             self._playing = True
         elif reason in {"playback_stopped", "disconnected"}:
             self._playing = False
-        if self._rpc is not None:
-            self._rpc.broadcast_threadsafe("conversation.activity", {"reason": reason})
+        if reason == "disconnected" and not self._restart_requested.is_set():
+            self._connection_state = Conversation.ConnectionState.DISCONNECTED
 
     async def _run_on_stream_loop(self, coroutine: Coroutine[object, object, ResultT]) -> ResultT:
         loop = self._asyncio_loop
@@ -116,51 +116,51 @@ class LocalStream:
     async def request_restart(self, reason: str) -> None:
         """Request one session restart from the owning stream loop."""
         logger.info("Live restart requested: %s", reason)
-        self._connection_state = "connecting"
+        self._connection_state = Conversation.ConnectionState.CONNECTING
         self._restart_requested.set()
-        await self._conversation.shutdown()
 
-    async def apply_personality(self, profile: str | None) -> str:
-        """Validate and apply a profile through a session restart."""
+    async def restart(self, profile: str) -> None:
+        """Validate configuration and accept a restart on the conversation loop."""
+        await self._run_on_stream_loop(self._apply_profile(profile))
+
+    async def _apply_profile(self, profile: str) -> None:
         previous_profile = config.REACHY_MINI_CUSTOM_PROFILE
-        set_custom_profile(profile)
+        set_custom_profile(profile or previous_profile)
         try:
             get_profile_instructions()
             get_function_tools(selected_tool_names(str(self._instance_path) if self._instance_path else None))
         except Exception:
             set_custom_profile(previous_profile)
             raise
-        await self.request_restart("personality_changed")
-        return "Applied personality and restarting the conversation."
-
-    async def change_voice(self, voice: str) -> str:
-        """Persist a supported voice and restart because session voices are immutable."""
-        if voice not in get_available_voices():
-            raise ValueError(f"Unsupported OpenAI voice: {voice}")
-        self._voice = voice
         settings = read_startup_settings(self._instance_path)
-        write_startup_settings(self._instance_path, profile=settings.profile, voice=voice)
-        await self.request_restart("voice_changed")
-        return f"Voice changed to {voice}; restarting the conversation."
+        self._voice = settings.voice or get_session_voice(default=get_default_voice())
+        await self.request_restart("configuration_changed")
 
-    async def get_available_voices(self) -> list[str]:
-        """Return supported OpenAI Live voices."""
-        return get_available_voices()
+    async def say(self, text: str) -> None:
+        """Submit typed input on the conversation loop."""
+        await self._run_on_stream_loop(self._conversation.say(text))
 
-    def get_current_voice(self) -> str:
-        """Return the voice selected for the active session."""
-        return self._voice
+    async def interrupt(self) -> None:
+        """Clear playback and interrupt speech on the conversation loop."""
+        await self._run_on_stream_loop(self._conversation.interrupt())
 
-    def _persist_personality(self, profile: str | None, voice: str | None) -> None:
-        write_startup_settings(self._instance_path, profile=profile, voice=voice)
+    async def set_muted(self, muted: bool) -> None:
+        """Set local microphone silence independently of network state."""
+        if muted != self._mic_muted:
+            self._mic_muted = muted
+            logger.info("Microphone mute changed: muted=%s", muted)
+
+    async def set_api_key(self, api_key: str) -> None:
+        """Persist the credential without exposing it in status responses."""
+        await asyncio.to_thread(self._persist_openai_key, api_key)
 
     def _persist_openai_key(self, api_key: str) -> None:
         normalized_key = api_key.strip()
-        if not normalized_key:
-            raise ValueError("OpenAI API key is required")
-        os.environ[OPENAI_API_KEY_ENV] = normalized_key
-        refresh_runtime_config_from_env()
+        if not normalized_key or "\n" in normalized_key or "\r" in normalized_key:
+            raise ValueError("OpenAI API key must be a non-empty single line")
         if self._instance_path is None:
+            os.environ[OPENAI_API_KEY_ENV] = normalized_key
+            refresh_runtime_config_from_env()
             return
         env_path = self._instance_path / ".env"
         try:
@@ -175,22 +175,26 @@ class LocalStream:
         else:
             lines.append(replacement)
         env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.environ[OPENAI_API_KEY_ENV] = normalized_key
+        refresh_runtime_config_from_env()
         logger.info("Persisted %s to the app instance configuration", OPENAI_API_KEY_ENV)
 
-    def _status(self) -> dict[str, object]:
-        return {
-            "model": LIVE_MODEL,
-            "has_key": has_openai_api_key(),
-            "connected": self._conversation.connected,
-            "connection_state": "connected" if self._conversation.connected else self._connection_state,
-            "connection_error": None if self._conversation.connected else self._connection_error,
-            "voice": self._voice,
-            "muted": self._mic_muted,
-            "playing": self._playing,
-        }
+    def snapshot(self) -> Conversation:
+        """Return the current local conversation resource."""
+        connected = self._conversation.connected and not self._restart_requested.is_set()
+        return Conversation(
+            name="conversation",
+            profile=profile_resource_name(config.REACHY_MINI_CUSTOM_PROFILE),
+            model=LIVE_MODEL,
+            connection_state=(Conversation.ConnectionState.CONNECTED if connected else self._connection_state),
+            connection_error="" if connected else self._connection_error or "",
+            voice=self._voice,
+            muted=self._mic_muted,
+            playing=self._playing,
+        )
 
     def init_settings_ui(self) -> None:
-        """Mount the small settings and conversation JSON-RPC surface."""
+        """Mount the generated Connect service and packaged browser UI."""
         if self._settings_initialized or self._settings_app is None:
             return
         app = self._settings_app
@@ -212,58 +216,11 @@ class LocalStream:
             """Avoid a noisy missing favicon request."""
             return Response(status_code=204)
 
-        rpc = JsonRpcServer()
-
-        def status(_params: dict[str, object]) -> dict[str, object]:
-            return self._status()
-
-        async def say(params: dict[str, object]) -> dict[str, object]:
-            text = str(params.get("text", "")).strip()
-            if not text:
-                raise JsonRpcError("say requires text", reason="invalid_params", code=-32602)
-            await self._run_on_stream_loop(self._conversation.say(text))
-            return {"ok": True}
-
-        async def interrupt(_params: dict[str, object]) -> dict[str, object]:
-            await self._run_on_stream_loop(self._conversation.interrupt())
-            return {"ok": True}
-
-        def microphone(params: dict[str, object]) -> dict[str, object]:
-            if "muted" in params and bool(params["muted"]) != self._mic_muted:
-                self._mic_muted = bool(params["muted"])
-                logger.info("Microphone mute changed: muted=%s", self._mic_muted)
-            return {"muted": self._mic_muted}
-
-        async def configure_openai(params: dict[str, object]) -> dict[str, object]:
-            api_key = str(params.get("api_key", ""))
-            try:
-                self._persist_openai_key(api_key)
-            except (OSError, ValueError) as error:
-                raise JsonRpcError(str(error), reason="invalid_openai_key", code=-32602) from error
-            await self._run_on_stream_loop(self.request_restart("openai_key_changed"))
-            return self._status()
-
-        rpc.register("conversation.status", status)
-        rpc.register("conversation.say", say)
-        rpc.register("conversation.interrupt", interrupt)
-        rpc.register("conversation.mic", microphone)
-        rpc.register("openai.config", configure_openai)
-        rpc.mount(app)
-        self._rpc = rpc
-
-        personality_ops = build_personality_ops(
-            self,
-            lambda: self._asyncio_loop,
-            persist_personality=self._persist_personality,
-            get_persisted_personality=lambda: read_startup_settings(self._instance_path).profile,
+        service = ConversationServiceASGIApplication(
+            ConversationService(self, self._instance_path), interceptors=[RequestErrors(), RequestLimits()]
         )
-        register_personality_methods(rpc, personality_ops)
-        register_profile_tool_methods(
-            rpc,
-            lambda: self._asyncio_loop,
-            self.request_restart,
-            instance_path=self._instance_path,
-        )
+        # Starlette and Connect annotate the same ASGI protocol with incompatible scope types.
+        app.mount("/rpc", cast(ASGIApp, service))
         self._settings_initialized = True
 
     async def _run_session_loop(self) -> None:
@@ -271,8 +228,9 @@ class LocalStream:
         attempt = 0
         while not self._stop_event.is_set():
             if not has_openai_api_key():
-                self._connection_state = "waiting_for_config"
+                self._connection_state = Conversation.ConnectionState.WAITING_FOR_CONFIG
                 self._connection_error = f"{OPENAI_API_KEY_ENV} is not configured"
+                self._restart_requested.clear()
                 await self._wait_for_restart(0.5)
                 continue
             if self._restart_requested.is_set():
@@ -281,20 +239,26 @@ class LocalStream:
             if conversation.voice != self._voice:
                 conversation = self._conversation_factory(self._voice)
             self._install_conversation(conversation)
-            self._connection_state = "connecting"
+            self._connection_state = Conversation.ConnectionState.CONNECTING
             self._connection_error = None
             attempt += 1
             started_at = time.monotonic()
             reason = "remote_close"
             logger.info("Live connection attempt: attempt=%d model=%s voice=%s", attempt, LIVE_MODEL, self._voice)
+            session_task = asyncio.create_task(conversation.start_up())
+            restart_task = asyncio.create_task(self._restart_requested.wait())
             try:
-                await conversation.start_up()
+                finished, _ = await asyncio.wait({session_task, restart_task}, return_when=asyncio.FIRST_COMPLETED)
+                if session_task in finished:
+                    await session_task
+                else:
+                    await conversation.shutdown()
             except asyncio.CancelledError:
                 reason = "stopped"
                 raise
             except Exception as error:
                 reason = "error"
-                self._connection_state = "disconnected"
+                self._connection_state = Conversation.ConnectionState.DISCONNECTED
                 self._connection_error = f"{type(error).__name__}: {error}"
                 logger.warning(
                     "Live session failed: attempt=%d elapsed=%.1fs error=%s",
@@ -304,6 +268,9 @@ class LocalStream:
                     exc_info=logger.isEnabledFor(logging.DEBUG),
                 )
             finally:
+                session_task.cancel()
+                restart_task.cancel()
+                await asyncio.gather(session_task, restart_task, return_exceptions=True)
                 if self._stop_event.is_set():
                     reason = "stopped"
                 elif self._restart_requested.is_set():

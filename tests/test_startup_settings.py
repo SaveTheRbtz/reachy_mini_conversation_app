@@ -15,6 +15,20 @@ def test_write_and_read_startup_settings(tmp_path) -> None:
     assert read_startup_settings(tmp_path) == StartupSettings(profile="sorry_bro", voice="shimmer")
 
 
+def test_standalone_settings_survive_restart(tmp_path, monkeypatch) -> None:
+    """The CLI UI stores startup preferences beside its existing custom profiles."""
+    monkeypatch.chdir(tmp_path)
+    write_startup_settings(None, profile="sorry_bro", voice="shimmer")
+    assert (tmp_path / "external_content" / "startup_settings.json").is_file()
+    applied_profiles: list[str | None] = []
+    monkeypatch.setattr(
+        "reachy_mini_conversation_app.startup_settings.set_custom_profile",
+        applied_profiles.append,
+    )
+    assert load_startup_settings_into_runtime(None) == StartupSettings(profile="sorry_bro", voice="shimmer")
+    assert applied_profiles == ["sorry_bro"]
+
+
 def test_load_startup_settings_into_runtime_applies_profile_when_no_env(monkeypatch, tmp_path) -> None:
     """Startup settings should seed the runtime profile when no explicit env override exists."""
     write_startup_settings(tmp_path, profile="sorry_bro", voice="shimmer")

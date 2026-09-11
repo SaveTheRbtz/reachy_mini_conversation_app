@@ -3,14 +3,12 @@
 import re
 import shutil
 import logging
-from typing import TypeAlias
 from pathlib import Path
 from collections.abc import Iterable
 
 from reachy_mini_conversation_app.config import (
     USER_PERSONALITIES_DIRNAME,
     config,
-    get_default_voice,
 )
 from reachy_mini_conversation_app.profile_store import (
     DEFAULT_PROFILE_NAME,
@@ -21,24 +19,12 @@ from reachy_mini_conversation_app.profile_store import (
     read_packaged_default_profile,
 )
 from reachy_mini_conversation_app.profile_toolsets import (
-    read_profile_toolsets,
-    write_profile_toolsets,
-    get_profile_toolsets_path,
     clear_profile_tool_override,
     profile_toolsets_transaction,
-)
-from reachy_mini_conversation_app.tools.core_tools import (
-    ToolCatalogEntry,
-)
-from reachy_mini_conversation_app.tools.core_tools import (
-    available_tool_catalog as available_tool_catalog,
 )
 
 
 logger = logging.getLogger(__name__)
-
-
-AvailableTool: TypeAlias = ToolCatalogEntry
 
 
 def _visible_profile_names(profiles_root: Path, prefix: str = "") -> list[str]:
@@ -101,8 +87,9 @@ def save_user_personality(
         raise ValueError(f"Profile {profile_name!r} must have non-empty instructions.")
 
     profile_directory = config.user_personalities_root() / profile_name
+    if not profile_directory.resolve().is_relative_to(config.user_personalities_root().resolve()):
+        raise ValueError("Profile storage must remain inside the user-profile directory.")
     selection = f"{USER_PERSONALITIES_DIRNAME}/{profile_name}"
-    selected_voice = voice or get_default_voice()
     authored_tools = tuple(default_tools) if default_tools is not None else None
     with profile_toolsets_transaction():
         if profile_directory.exists() and not overwrite:
@@ -117,31 +104,14 @@ def save_user_personality(
         if authored_tools is not None:
             profile_tools = authored_tools
 
-        toolsets_path = get_profile_toolsets_path(config.INSTANCE_PATH)
-        toolsets_existed = toolsets_path.is_file()
-        previous_toolsets = read_profile_toolsets(config.INSTANCE_PATH) if authored_tools is not None else None
-
-        if authored_tools is not None:
-            clear_profile_tool_override(selection, config.INSTANCE_PATH)
-
-        try:
-            write_profile(
-                profile_name,
-                profile_directory,
-                instructions,
-                profile_tools,
-                voice=selected_voice,
-                greeting=greeting,
-                hidden=hidden,
-                overwrite=overwrite,
-            )
-        except OSError:
-            try:
-                if toolsets_existed and previous_toolsets is not None:
-                    write_profile_toolsets(config.INSTANCE_PATH, previous_toolsets)
-                elif authored_tools is not None:
-                    toolsets_path.unlink(missing_ok=True)
-            except OSError as exc:
-                logger.warning("Failed to restore profile toolsets after saving profile %r: %s", profile_name, exc)
-            raise
+        write_profile(
+            profile_name,
+            profile_directory,
+            instructions,
+            profile_tools,
+            voice=voice,
+            greeting=greeting,
+            hidden=hidden,
+            overwrite=overwrite,
+        )
     return selection

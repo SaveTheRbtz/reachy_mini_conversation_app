@@ -247,11 +247,11 @@ def test_headless_profile_write_skips_empty_greeting(
     assert "greeting =" not in profile_text
 
 
-def test_headless_profile_write_defaults_voice_at_call_time(
+def test_headless_profile_write_preserves_inherited_voice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """New headless profiles should use the OpenAI default voice."""
+    """An unspecified profile voice should keep inheriting the app default."""
     monkeypatch.setattr(config, "INSTANCE_PATH", tmp_path)
 
     headless_mod.save_user_personality("runtime_voice_default", "test instructions")
@@ -260,7 +260,7 @@ def test_headless_profile_write_defaults_voice_at_call_time(
         "runtime_voice_default",
         tmp_path / "user_personalities" / "runtime_voice_default",
     )
-    assert profile.voice == "gleam"
+    assert profile.voice is None
 
 
 def test_headless_profile_write_uses_terminal_storage_without_instance(

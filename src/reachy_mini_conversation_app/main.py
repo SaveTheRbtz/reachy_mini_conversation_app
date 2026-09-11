@@ -92,16 +92,16 @@ def run(
     )
     set_instance_path(instance_path)
     startup_settings = StartupSettings()
-    if instance_path is not None:
-        env_path = Path(instance_path) / ".env"
-        try:
+    try:
+        if instance_path is not None:
+            env_path = Path(instance_path) / ".env"
             if env_path.exists():
                 load_dotenv(dotenv_path=env_path, override=True)
                 refresh_runtime_config_from_env()
                 logger.info("Loaded instance configuration from %s", env_path)
-            startup_settings = load_startup_settings_into_runtime(instance_path)
-        except (OSError, ValueError) as error:
-            logger.warning("Failed to load instance settings: %s", error)
+        startup_settings = load_startup_settings_into_runtime(instance_path)
+    except (OSError, ValueError) as error:
+        logger.warning("Failed to load instance settings: %s", error)
 
     if robot is None:
         try:

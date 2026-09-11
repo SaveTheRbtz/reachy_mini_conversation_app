@@ -13,12 +13,15 @@ def test_run_launches_without_capturing_camera_frames(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     no_camera: bool,
+    tmp_path,
 ) -> None:
     """Launch with the selected camera setting and leave capture to the camera tool."""
     robot = MagicMock()
     robot.media.get_output_audio_samplerate.return_value = 48_000
     stream = MagicMock()
 
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REACHY_MINI_CUSTOM_PROFILE", "curious_kids_ru")
     monkeypatch.setattr(main_module, "setup_logger", MagicMock(return_value=logging.getLogger(main_module.__name__)))
     monkeypatch.setattr(main_module.config, "REACHY_MINI_CUSTOM_PROFILE", "curious_kids_ru")
     monkeypatch.setattr(

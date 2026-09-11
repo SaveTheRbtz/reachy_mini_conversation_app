@@ -2,11 +2,11 @@ import base64
 import asyncio
 import logging
 from types import SimpleNamespace
+from threading import Thread
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
-from fastapi import FastAPI
 from openai.types.live.output_audio_delta_event import OutputAudioDeltaEvent
 
 import reachy_mini_conversation_app.console as console_module
@@ -14,6 +14,8 @@ import reachy_mini_conversation_app.realtime as realtime_module
 from reachy_mini_conversation_app.memory import MemorySnapshot
 from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.realtime import PlaybackAudio, LiveConversation
+from reachy_mini_conversation_app.startup_settings import write_startup_settings
+from reachy_mini_conversation_app.gen.reachy.conversation.v1.api_pb import Conversation
 
 
 def _conversation() -> SimpleNamespace:
@@ -76,35 +78,30 @@ def test_status_reports_microphone_and_playback_independently() -> None:
     stream._mic_muted = True
     activity("playback_started")
     activity("interaction")
-    status = stream._status()
-    assert status["muted"] is True
-    assert status["playing"] is True
+    status = stream.snapshot()
+    assert status.muted is True
+    assert status.playing is True
     activity("disconnected")
-    assert stream._status()["playing"] is False
+    assert stream.snapshot().playing is False
 
 
 @pytest.mark.asyncio
-async def test_voice_change_persists_and_requests_one_session_restart(tmp_path) -> None:
-    """Apply an immutable session voice through the stream's restart owner."""
-    conversation = SimpleNamespace(
-        voice="gleam",
-        connected=True,
-        shutdown=AsyncMock(),
-        set_clear_player=MagicMock(),
-        set_activity_observer=MagicMock(),
-    )
-    robot = SimpleNamespace()
-    stream = LocalStream(
-        robot,
-        conversation_factory=MagicMock(return_value=conversation),
-        instance_path=tmp_path,
-    )
-
-    status = await stream.change_voice("coral")
-
-    assert status == "Voice changed to coral; restarting the conversation."
-    conversation.shutdown.assert_awaited_once_with()
-    assert '"voice": "coral"' in (tmp_path / "startup_settings.json").read_text(encoding="utf-8")
+@pytest.mark.parametrize("voice_override, expected", [("coral", "coral"), (None, "shimmer")])
+async def test_restart_resolves_voice_without_waiting_for_remote_shutdown(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, voice_override: str | None, expected: str
+) -> None:
+    """Accept a restart locally using the same voice precedence as app startup."""
+    conversation = _conversation()
+    stream = LocalStream(_robot(), conversation_factory=lambda voice: conversation, instance_path=tmp_path)
+    stream._asyncio_loop = asyncio.get_running_loop()
+    write_startup_settings(tmp_path, profile=None, voice=voice_override)
+    monkeypatch.setattr(console_module, "get_profile_instructions", lambda: "Profile instructions")
+    monkeypatch.setattr(console_module, "get_function_tools", lambda names: [])
+    monkeypatch.setattr(console_module, "get_session_voice", lambda default: "shimmer")
+    await stream.restart("")
+    assert stream.snapshot().voice == expected
+    assert stream.snapshot().connection_state == Conversation.ConnectionState.CONNECTING
+    conversation.shutdown.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -149,24 +146,49 @@ async def test_session_logs_end_reason_and_reconnect_delay(
         )
 
 
-def test_microphone_mute_logs_only_changes(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    """Expose intentional microphone silence without logging repeated settings reads."""
-    settings_app = FastAPI()
-    stream = LocalStream(
-        _robot(), conversation_factory=MagicMock(return_value=_conversation()), settings_app=settings_app
-    )
-    rpc = MagicMock()
-    monkeypatch.setattr(console_module, "JsonRpcServer", lambda: rpc)
-    stream.init_settings_ui()
-    microphone = next(call.args[1] for call in rpc.register.call_args_list if call.args[0] == "conversation.mic")
+@pytest.mark.asyncio
+async def test_microphone_mute_logs_only_changes(caplog: pytest.LogCaptureFixture) -> None:
+    """Local microphone control remains available before the network loop starts."""
+    stream = LocalStream(_robot(), conversation_factory=lambda voice: _conversation())
     with caplog.at_level(logging.INFO, logger=console_module.__name__):
-        for params in ({}, {"muted": True}, {"muted": True}, {"muted": False}):
-            assert microphone(params) == {"muted": params.get("muted", False)}
+        for muted in (False, True, True, False):
+            await stream.set_muted(muted)
+            assert stream.snapshot().muted is muted
 
     assert [message for message in caplog.messages if "Microphone mute changed" in message] == [
         "Microphone mute changed: muted=True",
         "Microphone mute changed: muted=False",
     ]
+
+
+@pytest.mark.asyncio
+async def test_restart_without_api_key_waits_instead_of_spinning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A restart with no credential must leave the event loop responsive."""
+    stream = LocalStream(_robot(), conversation_factory=lambda voice: _conversation())
+    stream.conversation.connected = False
+    monkeypatch.setattr(console_module, "has_openai_api_key", lambda: False)
+    await stream.request_restart("test")
+
+    async def wait_for_configuration(timeout: float) -> None:
+        assert not stream._restart_requested.is_set()
+        stream._stop_event.set()
+
+    monkeypatch.setattr(stream, "_wait_for_restart", wait_for_configuration)
+    await stream._run_session_loop()
+    assert stream.snapshot().connection_state == Conversation.ConnectionState.WAITING_FOR_CONFIG
+
+
+@pytest.mark.asyncio
+async def test_api_key_persistence_failure_keeps_runtime_credential(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed credential save must not silently switch the running configuration."""
+    stream = LocalStream(_robot(), conversation_factory=lambda voice: _conversation(), instance_path=tmp_path)
+    monkeypatch.setenv(console_module.OPENAI_API_KEY_ENV, "existing-key")
+    (tmp_path / ".env").mkdir()
+    with pytest.raises(OSError):
+        await stream.set_api_key("replacement-key")
+    assert console_module.os.environ[console_module.OPENAI_API_KEY_ENV] == "existing-key"
+    with pytest.raises(ValueError, match="single line"):
+        await stream.set_api_key("replacement-key\nUNRELATED_SETTING=1")
 
 
 @pytest.mark.asyncio
@@ -424,3 +446,90 @@ def test_close_finalizes_while_session_receiver_is_alive(monkeypatch: pytest.Mon
     assert receiver_exited
     robot.media.stop_recording.assert_called_once_with()
     robot.media.stop_playing.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_restart_cancels_stalled_startup_after_finalization(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep local controls responsive while the session owner finalizes a stalled connection."""
+    connecting = _conversation()
+    replacement = _conversation()
+    connecting.history = [("user", "Old dialogue")]
+    started = asyncio.Event()
+    shutdown_started = asyncio.Event()
+    finish_shutdown = asyncio.Event()
+    startup_cancelled = asyncio.Event()
+    conversations = iter((connecting, replacement))
+    stream = LocalStream(_robot(), conversation_factory=lambda voice: next(conversations))
+    monkeypatch.setattr(console_module, "has_openai_api_key", lambda: True)
+
+    async def connect() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            startup_cancelled.set()
+
+    async def shutdown() -> None:
+        shutdown_started.set()
+        await finish_shutdown.wait()
+
+    async def start_replacement() -> None:
+        stream._stop_event.set()
+
+    connecting.start_up = AsyncMock(side_effect=connect)
+    connecting.shutdown.side_effect = shutdown
+    replacement.start_up = AsyncMock(side_effect=start_replacement)
+    session = asyncio.create_task(stream._run_session_loop())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await stream.request_restart("configuration_changed")
+        await asyncio.wait_for(shutdown_started.wait(), timeout=1.0)
+        await stream.set_muted(True)
+        assert stream.snapshot().muted is True
+        assert stream.snapshot().connection_state == Conversation.ConnectionState.CONNECTING
+        assert not startup_cancelled.is_set()
+        finish_shutdown.set()
+        await asyncio.wait_for(session, timeout=1.0)
+    finally:
+        session.cancel()
+        await asyncio.gather(session, return_exceptions=True)
+    assert startup_cancelled.is_set()
+    replacement.start_up.assert_awaited_once_with()
+    assert replacement.history == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_rpc_cancels_work_on_the_audio_loop() -> None:
+    """A caller deadline must cancel its remote send across the ASGI and audio event loops."""
+    conversation = _conversation()
+    stream = LocalStream(_robot(), conversation_factory=lambda voice: conversation)
+    caller_loop = asyncio.get_running_loop()
+    owner_loop = asyncio.new_event_loop()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def say(text: str) -> None:
+        assert asyncio.get_running_loop() is owner_loop
+        caller_loop.call_soon_threadsafe(started.set)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            caller_loop.call_soon_threadsafe(cancelled.set)
+
+    conversation.say = AsyncMock(side_effect=say)
+    stream._asyncio_loop = owner_loop
+    owner = Thread(target=owner_loop.run_forever)
+    owner.start()
+    request = asyncio.create_task(stream.say("hello"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+    finally:
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+        owner_loop.call_soon_threadsafe(owner_loop.stop)
+        await asyncio.to_thread(owner.join)
+        owner_loop.close()
