@@ -12,8 +12,10 @@ import pytest
 from pydantic import TypeAdapter
 from openai.types.live.server_event import ServerEvent
 
+import reachy_mini_conversation_app.console as console_module
 import reachy_mini_conversation_app.realtime as realtime_module
 from reachy_mini_conversation_app.memory import MemorySnapshot
+from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.realtime import PlaybackAudio, LiveConversation, StreamingAudioBridge
 
 
@@ -183,6 +185,7 @@ async def test_session_gates_microphone_until_started_and_waits_for_final_usage(
         await live_transport.events.put(_event("session.started", session=SESSION))
         await _eventually(lambda: conversation.connected)
         await conversation.receive(microphone)
+        await _eventually(lambda: live_transport.session.input_audio.append.await_count == 1)
         live_transport.session.input_audio.append.assert_awaited_once()
         config = live_transport.session.start.await_args.kwargs["session"]
         assert config["model"] == "gpt-live-1"
@@ -209,19 +212,103 @@ async def test_session_gates_microphone_until_started_and_waits_for_final_usage(
 
 
 @pytest.mark.asyncio
-async def test_full_duplex_input_does_not_discard_speaking_audio() -> None:
+async def test_full_duplex_input_does_not_discard_speaking_audio(live_transport: LiveTransport) -> None:
     """Keep microphone and playback flowing when input transcripts overlap speech."""
     conversation = _conversation()
-    transport = LiveTransport()
-    conversation._connection = transport
-    pcm = np.arange(2400, dtype="<i2")
-    await conversation._handle_event(_event("session.output_audio.delta", delta=base64.b64encode(pcm).decode()))
-    await conversation._handle_event(_event("session.input_transcript.delta", delta="yes", start_ms=10, end_ms=20))
-    await conversation.receive((24_000, np.zeros(2400, dtype=np.float32)))
-    transport.session.input_audio.append.assert_awaited_once()
-    playback = await asyncio.wait_for(conversation.emit(), timeout=1)
-    np.testing.assert_allclose(playback.samples, pcm.astype(np.float32) / 32768)
-    assert conversation.output_queue.empty()
+    task = asyncio.create_task(conversation.start_up())
+    try:
+        await live_transport.events.put(_event("session.started", session=SESSION))
+        await _eventually(lambda: conversation.connected)
+        pcm = np.arange(2400, dtype="<i2")
+        await live_transport.events.put(_event("session.output_audio.delta", delta=base64.b64encode(pcm).decode()))
+        await live_transport.events.put(_event("session.input_transcript.delta", delta="yes", start_ms=10, end_ms=20))
+        await conversation.receive((24_000, np.zeros(2400, dtype=np.float32)))
+        await _eventually(lambda: live_transport.session.input_audio.append.await_count == 1)
+        playback = await asyncio.wait_for(conversation.emit(), timeout=1)
+        np.testing.assert_allclose(playback.samples, pcm.astype(np.float32) / 32768)
+        assert conversation.output_queue.empty()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("failure", ["disconnect", "stall"])
+def test_microphone_network_failure_reconnects_without_stopping_media(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replace a failed session and keep the robot's capture and playback loops alive."""
+    failed_transport = LiveTransport()
+    recovered_transport = LiveTransport()
+    for transport in (failed_transport, recovered_transport):
+        transport.events.put_nowait(_event("session.started", session=SESSION))
+    stalled_send: asyncio.Future[None] | None = None
+
+    async def fail_send(**kwargs: object) -> None:
+        nonlocal stalled_send
+        if failure == "stall":
+            stalled_send = asyncio.get_running_loop().create_future()
+            await stalled_send
+        raise ConnectionResetError("simulated network reset")
+
+    failed_transport.session.input_audio.append.side_effect = fail_send
+    client = MagicMock()
+    client.__aenter__.return_value = client
+    client.live.connect.side_effect = [failed_transport, recovered_transport]
+    monkeypatch.setattr(realtime_module, "AsyncOpenAI", MagicMock(return_value=client))
+    monkeypatch.setattr(realtime_module.config, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(realtime_module, "MICROPHONE_SEND_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(console_module, "RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(console_module.asyncio, "to_thread", AsyncMock())
+    robot = MagicMock()
+    robot.media.get_input_audio_samplerate.return_value = 24_000
+    robot.media.get_audio_sample.return_value = np.zeros(2400, dtype=np.float32)
+    stream = LocalStream(robot, conversation_factory=lambda voice: _conversation(), startup_voice="marin")
+    recovered_transport.session.input_audio.append.side_effect = lambda **kwargs: stream.close()
+    recovered_transport.session.close.side_effect = lambda: recovered_transport.events.put_nowait(
+        _event("session.closed", session=SESSION, reason="close_requested", usage={"seconds": 1.2})
+    )
+
+    stream.launch()
+
+    assert client.live.connect.call_count == 2
+    failed_transport.close.assert_awaited()
+    assert recovered_transport.session.input_audio.append.await_count >= 1
+    robot.media.start_recording.assert_called_once_with()
+    robot.media.start_playing.assert_called_once_with()
+    assert stream.conversation.usage_seconds == 1.2
+    if stalled_send is not None:
+        assert stalled_send.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_microphone_backpressure_keeps_only_the_latest_pending_frame(
+    live_transport: LiveTransport, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Keep capture responsive without accumulating stale microphone audio."""
+    conversation = _conversation()
+    release_send = asyncio.Event()
+
+    async def send_audio(**kwargs: object) -> None:
+        await release_send.wait()
+
+    live_transport.session.input_audio.append.side_effect = send_audio
+    session = asyncio.create_task(conversation.start_up())
+    try:
+        await live_transport.events.put(_event("session.started", session=SESSION))
+        await _eventually(lambda: conversation.connected)
+        await conversation.receive((24_000, np.zeros(2400, dtype=np.float32)))
+        await _eventually(lambda: live_transport.session.input_audio.append.await_count == 1)
+        for amplitude in (0.25, 0.5, 0.75):
+            await conversation.receive((24_000, np.full(2400, amplitude, dtype=np.float32)))
+        assert live_transport.session.input_audio.append.await_count == 1
+        release_send.set()
+        await _eventually(lambda: live_transport.session.input_audio.append.await_count == 2)
+        latest_audio = live_transport.session.input_audio.append.await_args.kwargs["audio"]
+        np.testing.assert_allclose(np.frombuffer(base64.b64decode(latest_audio), dtype="<i2"), 0.75 * 32767, atol=1)
+        assert sum("discarding queued audio" in message for message in caplog.messages) == 1
+    finally:
+        session.cancel()
+        await asyncio.gather(session, return_exceptions=True)
 
 
 @pytest.mark.asyncio
