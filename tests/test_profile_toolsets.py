@@ -6,6 +6,7 @@ import pytest
 
 import reachy_mini_conversation_app.profile_store as profile_store_mod
 from reachy_mini_conversation_app.config import config
+from reachy_mini_conversation_app.prompts import get_session_instructions
 from reachy_mini_conversation_app.profile_store import write_profile
 from reachy_mini_conversation_app.profile_toolsets import (
     read_profile_toolsets,
@@ -15,6 +16,7 @@ from reachy_mini_conversation_app.profile_toolsets import (
     clear_profile_tool_override,
     write_profile_tool_override,
 )
+from reachy_mini_conversation_app.tools.core_tools import available_tool_catalog
 
 
 TOOL_NAME = "web_search"
@@ -73,3 +75,18 @@ def test_default_profile_uses_canonical_storage_key(configured_profiles: Path) -
 
     assert read_profile_tool_override("default", instance_path) == ["dance"]
     assert read_profile_toolsets(instance_path).profiles == {"default": ["dance"]}
+
+
+def test_profile_can_disable_hosted_search(configured_profiles: Path) -> None:
+    """Hosted search should follow the same profile settings as local function tools."""
+    enabled = read_profile_tool_names("guide", configured_profiles)
+    catalog = available_tool_catalog(enabled)
+    assert [entry["id"] for entry in catalog] == ["camera", "move_head", "web_search"]
+    assert catalog[-1]["description"] in get_session_instructions(enabled)
+
+    write_profile_tool_override("guide", ["camera"], configured_profiles)
+
+    enabled = read_profile_tool_names("guide", configured_profiles)
+    assert [entry["id"] for entry in available_tool_catalog(enabled)] == ["camera"]
+    assert "- web_search:" not in get_session_instructions(enabled)
+    assert "web_search" in {entry["id"] for entry in available_tool_catalog()}

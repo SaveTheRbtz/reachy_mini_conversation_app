@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 import soxr
 import numpy as np
-from agents import FunctionTool
+from agents import ItemHelpers, FunctionTool, ToolOutputImage
 from openai import AsyncOpenAI
 from pydantic import ValidationError
 from numpy.typing import NDArray
@@ -25,6 +25,7 @@ from openai.types.responses import (
 from openai.resources.live.live import AsyncLiveConnection
 from openai.types.live.server_event import ServerEvent
 from openai.types.live.session_config_param import SessionConfigParam
+from openai.types.live.responses_delegation_config_param import Tool
 
 from reachy_mini_conversation_app.config import LIVE_MODEL, DELEGATION_MODEL, config
 from reachy_mini_conversation_app.prompts import (
@@ -124,7 +125,6 @@ class LiveConversation:
         self._history_role: Literal["user", "assistant"] | None = None
         self.output_queue: asyncio.Queue[PlaybackAudio] = asyncio.Queue()
         self._microphone_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=1)
-        self.last_activity_time = time.monotonic()
         self.usage_seconds = 0.0
         self._connection: AsyncLiveConnection | None = None
         self._transport: AsyncLiveConnection | None = None
@@ -156,8 +156,7 @@ class LiveConversation:
         """Attach the Reachy playback flush callback."""
         self._clear_player = clear_player
 
-    def _mark_activity(self, reason: str) -> None:
-        self.last_activity_time = time.monotonic()
+    def _notify_activity(self, reason: str) -> None:
         if self._activity_observer is not None:
             self._activity_observer(reason)
 
@@ -168,6 +167,7 @@ class LiveConversation:
             text = self.history.pop()[1] + text
         text = text.encode("utf-8")[-HISTORY_MAX_BYTES:].decode("utf-8", errors="ignore")
         self.history.append((role, text))
+        self._notify_activity("interaction")
         self._history_role = None if new_message else role
         while (
             len(self.history) > HISTORY_MAX_MESSAGES
@@ -186,6 +186,18 @@ class LiveConversation:
             str(self.dependencies.instance_path) if self.dependencies.instance_path is not None else None
         )
         self._tools = {tool.name: tool for tool in get_function_tools(enabled_names)}
+        backend_tools: list[Tool] = [
+            {
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.params_json_schema,
+                "strict": tool.strict_json_schema,
+            }
+            for tool in self._tools.values()
+        ]
+        if "web_search" in enabled_names:
+            backend_tools.append({"type": "web_search"})
         instructions = get_session_instructions(enabled_names)
         if self.history:
             instructions += (
@@ -214,16 +226,7 @@ class LiveConversation:
                     "reasoning": {"effort": "low"},
                     "instructions": get_backend_instructions(self.dependencies),
                     "parallel_tool_calls": False,
-                    "tools": [
-                        {
-                            "type": "function",
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.params_json_schema,
-                            "strict": tool.strict_json_schema,
-                        }
-                        for tool in self._tools.values()
-                    ],
+                    "tools": backend_tools,
                 },
             },
         }
@@ -248,8 +251,7 @@ class LiveConversation:
                             if event.type == "session.started":
                                 self._connection = connection
                                 logger.info("Live session started: session_id=%s", event.session.id)
-                                self.dependencies.movement_manager.set_listening(True)
-                                self._mark_activity("connected")
+                                self._notify_activity("connected")
                             elif event.type == "error":
                                 raise RuntimeError(
                                     f"Live startup failed: type={event.error.type} code={event.error.code}"
@@ -287,11 +289,10 @@ class LiveConversation:
                     self._pending_input = False
                     self._backend_commands.clear()
                     self.clear_playback()
-                    self.dependencies.movement_manager.set_listening(False)
                     self.dependencies.movement_manager.set_speaking(False)
                     self._connection = None
                     self._transport = None
-                    self._mark_activity("disconnected")
+                    self._notify_activity("disconnected")
                     await self._close_transport(connection)
 
     async def shutdown(self) -> None:
@@ -384,7 +385,6 @@ class LiveConversation:
             event_id = str(uuid4())
             self._backend_commands.add(event_id)
             await connection.response.create(event_id=event_id)
-        self._mark_activity("thinking")
 
     async def interrupt(self) -> None:
         """Clear local playback and ask Live to stop speaking and listen."""
@@ -402,7 +402,7 @@ class LiveConversation:
     async def acknowledge_after_playback(self, audio: PlaybackAudio) -> None:
         """Track a queued chunk for its estimated robot playback duration."""
         self.dependencies.movement_manager.set_speaking(True)
-        self._mark_activity("speaking")
+        self._notify_activity("playback_started")
         duration = audio.samples.size / self._bridge.output_sample_rate
         try:
             await asyncio.wait_for(self._playback_interrupted.wait(), timeout=duration)
@@ -410,10 +410,9 @@ class LiveConversation:
             return
 
     def acknowledge_playback_end(self) -> None:
-        """Mark listening when the local playback queue has drained."""
+        """Release the speaking pose when the local playback queue has drained."""
         self.dependencies.movement_manager.set_speaking(False)
-        self.dependencies.movement_manager.set_listening(True)
-        self._mark_activity("listening")
+        self._notify_activity("playback_stopped")
 
     async def _handle_event(self, event: ServerEvent) -> None:
         if event.type == "session.output_audio.delta":
@@ -425,11 +424,8 @@ class LiveConversation:
                 self.output_queue.put_nowait(PlaybackAudio(samples))
         elif event.type == "session.input_transcript.delta":
             self._remember("user", event.delta)
-            self._mark_activity("listening")
         elif event.type == "session.output_transcript.delta":
             self._remember("assistant", event.delta)
-        elif event.type == "session.delegation.created":
-            self._mark_activity("thinking")
         elif event.type == "response.event":
             nested_type = event.event.get("type")
             try:
@@ -505,6 +501,7 @@ class LiveConversation:
                 connection = self._connection
                 if connection is None or self._closing:
                     continue
+                previous_memory = self.dependencies.memory.model_dump()
                 for call in batch.calls.values():
                     if call.call_id in self._handled_call_ids:
                         continue
@@ -518,7 +515,6 @@ class LiveConversation:
                         batch.delegation_id,
                         batch.response_id,
                     )
-                    self._mark_activity("thinking")
                     output: object
                     if tool is None:
                         logger.warning("Rejected unavailable tool: %s", call.name)
@@ -545,11 +541,9 @@ class LiveConversation:
                     self._backend_commands.add(event_id)
                     await connection.response.item.create(
                         event_id=event_id,
-                        item={
-                            "type": "function_call_output",
-                            "call_id": call.call_id,
-                            "output": output if isinstance(output, str) else json.dumps(output),
-                        },
+                        item=ItemHelpers.tool_call_output_item(
+                            call, output if isinstance(output, (str, ToolOutputImage)) else json.dumps(output)
+                        ),
                     )
                 if not batch.calls:
                     if self._responses or not self._tool_batches.empty():
@@ -558,19 +552,20 @@ class LiveConversation:
                         self._backend_busy = False
                         continue
                 self._pending_input = False
-                event_id = str(uuid4())
-                self._backend_commands.add(event_id)
-                await connection.session.update(
-                    event_id=event_id,
-                    session={
-                        "delegation": {
-                            "type": "responses",
-                            "responses": {
-                                "instructions": get_backend_instructions(self.dependencies),
+                if self.dependencies.memory.model_dump() != previous_memory:
+                    event_id = str(uuid4())
+                    self._backend_commands.add(event_id)
+                    await connection.session.update(
+                        event_id=event_id,
+                        session={
+                            "delegation": {
+                                "type": "responses",
+                                "responses": {
+                                    "instructions": get_backend_instructions(self.dependencies),
+                                },
                             },
                         },
-                    },
-                )
+                    )
                 event_id = str(uuid4())
                 self._backend_commands.add(event_id)
                 await connection.response.create(event_id=event_id)

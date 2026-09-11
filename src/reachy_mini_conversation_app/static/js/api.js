@@ -31,6 +31,7 @@ function connect() {
       opened = true;
       connecting = null;
       resolve();
+      handleMessage({ method: "rpc.connection", params: { connected: true } });
     };
     ws.onmessage = (ev) => handleMessage(JSON.parse(ev.data));
     ws.onclose = () => {
@@ -41,6 +42,7 @@ function connect() {
         p.reject(new RpcError("connection closed", "disconnected"));
       }
       pending.clear();
+      handleMessage({ method: "rpc.connection", params: { connected: false } });
       if (!opened) reject(new RpcError("cannot reach /rpc", "disconnected"));
       // Keep the event stream alive across drops while anyone is listening.
       else if (subscribers.size > 0) setTimeout(() => connect().catch(() => {}), 1000);
@@ -98,7 +100,8 @@ export function subscribe(method, cb) {
   set.add(cb);
   connect().catch(() => {});
   return () => {
-    subscribers.get(method)?.delete(cb);
+    set.delete(cb);
+    if (set.size === 0) subscribers.delete(method);
   };
 }
 

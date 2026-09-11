@@ -13,7 +13,7 @@ from reachy_mini_conversation_app.profile_store import (
     read_profile,
     read_packaged_default_profile,
 )
-from reachy_mini_conversation_app.tools.core_tools import get_function_tools
+from reachy_mini_conversation_app.tools.core_tools import available_tool_catalog
 
 
 logger = logging.getLogger(__name__)
@@ -91,7 +91,9 @@ def get_profile_instructions() -> str:
 
 def get_session_instructions(enabled_tool_names: Iterable[str]) -> str:
     """Build the live voice prompt with only enabled backend capabilities."""
-    capabilities = "\n".join(f"- {tool.name}: {tool.description}" for tool in get_function_tools(enabled_tool_names))
+    capabilities = "\n".join(
+        f"- {tool['id']}: {tool['description']}" for tool in available_tool_catalog(enabled_tool_names)
+    )
     delegation = f"""Delegation policy:
 Backend tools:
 - Shared household context: recall saved interests, preferences, and facts without assuming who is speaking.

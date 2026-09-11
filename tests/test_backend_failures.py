@@ -19,7 +19,7 @@ def conversation() -> LiveConversation:
     dependencies = SimpleNamespace(
         instance_path=None,
         memory=MemorySnapshot(memories=[]),
-        movement_manager=SimpleNamespace(set_listening=MagicMock(), set_speaking=MagicMock()),
+        movement_manager=SimpleNamespace(set_speaking=MagicMock()),
     )
     conversation = LiveConversation(dependencies, voice="gleam", output_sample_rate=24_000)
     conversation._connection = SimpleNamespace(

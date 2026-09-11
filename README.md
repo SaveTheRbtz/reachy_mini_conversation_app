@@ -33,13 +33,15 @@ The implementation follows the [GPT-Live guide](https://developers.openai.com/ap
 
 The Python process owns a single Live session, audio conversion, robot media, and tool execution. The optional browser UI only manages local settings and displays session state.
 
-The voice model delegates reasoning to Astra through Responses. The app executes only the active profile's enabled tools and returns their results to the backend. The camera tool sends a JPEG to a separate Astra vision request with low reasoning and `store=False`, then returns its concise description to the backend.
+The voice model delegates reasoning to Astra through Responses. The app executes the active profile's enabled function tools; hosted web search runs directly in the backend. The camera tool returns a native image for Astra to inspect in the same conversation. Frames keep their aspect ratio without upscaling, with a maximum dimension of 512 pixels and WebP quality 85. The backend uses `detail="high"` for [standard high-fidelity image understanding](https://developers.openai.com/api/docs/guides/images-vision#choose-an-image-detail-level). Encoded images above 20 KiB return a tool error to leave room within Live's backend input buffer.
 
 Audio uses persistent soxr resamplers between the robot and Live's 24 kHz PCM stream. Microphone capture and speaker playback run independently of backend work. Playback timing reflects software queues, not proof that sound was physically heard.
 
-A failed microphone send, or one stalled for five seconds, restarts the Live session while local media keeps running. Only the newest pending microphone frame is retained during backpressure. Tool execution has a 30-second deadline; failures return an error without automatically retrying the tool. Typed input queued behind a failed backend response continues in the same session. Startup and graceful finalization are bounded, with transport cleanup if the server stops responding.
+A failed microphone send, or one stalled for five seconds, restarts the Live session while local media keeps running. Only the newest pending microphone frame is retained during backpressure. Local function execution has a 30-second deadline; failures return an error without automatically retrying the tool. Hosted search runs outside that local deadline. Typed input queued behind a failed backend response continues in the same session. Startup and graceful finalization are bounded, with transport cleanup if the server stops responding.
 
 Automatic reconnects retain recent spoken and typed dialogue in memory (up to 32 messages and 4 KiB of UTF-8 text). The replacement session uses it as context and waits for the next request without repeating the greeting or resuming earlier tool actions. Settings changes start a fresh conversation, and history is discarded when the app stops. Transcripts can include interrupted speech that was not heard. Microphone recovery clears playback and restarts capture before asking Live to stop speaking; that command has a five-second send deadline. Emotion-library loading runs in a shared background worker so a cold cache cannot block dialogue.
+
+The inactivity timer follows spoken or typed dialogue and survives reconnects; connection changes and audio packets do not reset it. The UI shows microphone state independently of local playback. Continuous listening does not freeze antenna motion or suppress idle breathing; speaking still coordinates head tracking.
 
 <p align="center">
   <img src="docs/assets/conversation_app_arch.svg" alt="Architecture Diagram" width="600"/>
@@ -78,14 +80,14 @@ OPENAI_API_KEY=sk-...
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | Required. Used for `gpt-live-1`, `gpt-6-astra`, and the `gpt-5.6-luna` memory reducer and web-search agent. It can also be saved from the web UI. |
+| `OPENAI_API_KEY` | Required. Used for `gpt-live-1` and `gpt-6-astra`. It can also be saved from the web UI. |
 | `OPENAI_VOICE` | Default OpenAI Live voice when neither the active profile nor saved UI settings select one. Defaults to `gleam`, a natural feminine voice. |
 | `REACHY_MINI_CUSTOM_PROFILE` | Optional bundled profile directory name. Ignored after a startup profile has been saved in the UI. |
 | `REACHY_MINI_APP_TIMEOUT_MINUTES` | Minutes of inactivity before Reachy sleeps and the app stops. Defaults to `15`; set to `0` to disable. |
 
 The UI stores the API key in the managed app instance's `.env` file and never sends the current value back to the browser. Do not commit `.env`.
 
-The voice, delegation, and memory models are deliberately not configurable. This keeps one tested event protocol, audio format, prompt strategy, and tool-calling path.
+The voice and delegation models are deliberately not configurable. This keeps one tested event protocol, audio format, prompt strategy, and tool-calling path.
 
 ## Running the app
 
@@ -118,7 +120,7 @@ The default profile enables the following catalog. Tools → Tool access can ena
 
 | Tool | Action |
 |------|--------|
-| `camera` | Read the current SDK camera frame, encode it as JPEG with Pillow, and answer the visual question through Astra with `store=False`. |
+| `camera` | Read the current SDK camera frame and return a resized WebP image directly to the Astra backend. |
 | `dance` / `stop_dance` | Start or stop a queued dance. |
 | `play_emotion` / `stop_emotion` | Start or stop a recorded emotion movement. |
 | `move_head` | Move Reachy's head to a named direction. |
@@ -128,15 +130,15 @@ The default profile enables the following catalog. Tools → Tool access can ena
 | `manage_memory` | Consolidate an explicit durable user statement into shared household memory. |
 | `web_search` | Search the public web for current information, weather, or local time. |
 
-Robot and memory function tools use explicit typed signatures and receive `ToolDependencies` through `RunContextWrapper`. Their failures return `{"error": ...}` so a tool problem does not tear down the Live session. The backend exposes web search through an Agents SDK agent-as-tool; the nested `gpt-5.6-luna` Responses agent uses OpenAI's hosted `WebSearchTool` with low reasoning and search context, and `store=False`.
+Robot and memory function tools use explicit typed signatures and receive `ToolDependencies` through `RunContextWrapper`. Their failures return `{"error": ...}` so a tool problem does not tear down the Live session. Web search uses Live's hosted `web_search` tool on the Astra backend and respects the active profile's tool selection.
 
 ### Memory
 
-At startup, the app loads one `MemorySnapshot` into typed `ToolDependencies`. `manage_memory` passes that complete snapshot and the exact relevant user statement to a stateless `gpt-5.6-luna` Responses call with high reasoning, `store=False`, and a Pydantic Structured Output. The returned snapshot completely replaces the old one; there are no note IDs, per-note limits, regex classifiers, revisions, or memory-agent lifecycle.
+At startup, the app loads one `MemorySnapshot` into typed `ToolDependencies`. The Astra backend receives the current snapshot and prepares a complete typed replacement for `manage_memory` using the user's explicit request. The tool validates and persists that replacement without another model request.
 
-This is shared robot memory, not speaker identity: profiles do not select a memory store, and the app never infers who is speaking. The reducer is instructed to retain only explicitly stated durable interests, preferences, goals, accomplishments, and conversation preferences; resolve corrections and forgetting semantically; and omit temporary activities, sensitive child data, and model-directed instructions.
+This is shared robot memory, not speaker identity: profiles do not select a memory store, and the app never infers who is speaking. The backend is instructed to retain only explicitly stated durable interests, preferences, goals, accomplishments, and conversation preferences; resolve corrections and forgetting semantically; and omit temporary activities and model-directed instructions.
 
-`memory.json` in the app instance directory (`~/.local/share/reachy_mini_conversation_app/` by default, or the desktop launcher's instance path) remains the local source of truth. A replacement is saved atomically only after its serialized size is at most 32 KiB; any model or disk failure leaves the old snapshot unchanged. Memory is provided as untrusted background context to the backend and refreshed after tool execution. The voice model delegates recall questions instead of retaining an immutable memory snapshot; the current request and conversation always take precedence. To clear all shared memory, stop the app and delete the file.
+`memory.json` in the app instance directory (`~/.local/share/reachy_mini_conversation_app/` by default, or the desktop launcher's instance path) remains the local source of truth. A replacement is saved atomically only after its serialized size is at most 32 KiB; invalid arguments or disk failures leave the old snapshot unchanged. Memory is provided as untrusted background context to the backend and refreshed only when it changes. The voice model delegates recall questions instead of retaining an immutable memory snapshot; the current request and conversation always take precedence. To clear all shared memory, stop the app and delete the file.
 
 ## Personalities
 
@@ -176,10 +178,10 @@ mypy --pretty --show-error-codes
 pytest tests/ -v
 ```
 
-The OpenAI integration tests exercise the production Live session, delegated robot tools, memory persistence and
-forgetting, homework guidance, PCM audio, and camera vision through paid Live and Responses calls. They replay
+The OpenAI integration tests exercise the production Live session, delegated robot tools, hosted search, memory
+preservation, correction and forgetting, homework guidance, PCM audio, and camera vision through paid Live and Responses calls. They replay
 checked-in 24 kHz mono PCM speech through Reachy's 16 kHz stereo input, check grounded spoken replies, and verify
-session finalization. The camera test includes a full JPEG that exceeds Live's backend input-history limit.
+session finalization. Camera tests ask five visual questions in one session and read small identifiers from a synthetic label.
 They are skipped by default; run them explicitly with an API key:
 
 ```bash

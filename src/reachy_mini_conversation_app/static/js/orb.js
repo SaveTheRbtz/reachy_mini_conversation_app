@@ -1,51 +1,16 @@
-/**
- * Conversation orb: SSE-driven state machine → CSS data-state attribute.
- * The root is a <button> - the talk view uses it as the mic toggle.
- */
+/** Microphone button with connection status and local playback animation. */
 
 import { h } from "./ui.js";
 import { GLOW_BY_STATE, ORB_STATES } from "./constants.js";
 
-/** Map a Live activity reason to a visual state; null means keep current. */
-export function mapActivityToState(reason) {
-  switch (reason) {
-    case "listening":
-      return ORB_STATES.LISTENING;
-
-    case "thinking":
-      return ORB_STATES.THINKING;
-
-    case "speaking":
-      return ORB_STATES.SPEAKING;
-
-    case "connected":
-      return ORB_STATES.IDLE;
-
-    case "disconnected":
-      return ORB_STATES.ERROR;
-
-    default:
-      return null;
-  }
-}
-
-// A quiet session has no idle event, so this timeout returns the orb to idle.
-const IDLE_FALLBACK_MS = 1500;
-
-/** Build the orb DOM. Returns { root, setState, dispose }. */
-export function createOrb({ initialState = ORB_STATES.IDLE, onStateChange } = {}) {
-  let currentState = initialState;
-  let idleTimer = null;
-
+/** Build the microphone control and its independent playback animation. */
+export function createOrb({ initialState = ORB_STATES.IDLE } = {}) {
   const indicator = h(
     "span",
     { class: "convo-orb__indicator", "aria-hidden": "true" },
     micIcon(),
     micOffIcon(),
     spinnerIndicator(),
-    barsIndicator(),
-    thinkingDotsIndicator(),
-    voiceWaveIcon(),
     errorIcon()
   );
 
@@ -54,9 +19,9 @@ export function createOrb({ initialState = ORB_STATES.IDLE, onStateChange } = {}
     {
       type: "button",
       class: "convo-orb",
-      dataset: { state: currentState },
+      dataset: { state: initialState, playing: "false" },
       "aria-label": "Conversation status",
-      style: { "--glow": GLOW_BY_STATE[currentState] },
+      style: { "--glow": GLOW_BY_STATE[initialState] },
     },
     h("span", { class: "convo-orb__glow", "aria-hidden": "true" }),
     h("span", { class: "convo-orb__ring", "aria-hidden": "true" }),
@@ -64,85 +29,17 @@ export function createOrb({ initialState = ORB_STATES.IDLE, onStateChange } = {}
     h("span", { class: "convo-orb__core" }, indicator)
   );
 
-  /** Update the orb to reflect a new visual state. */
-  function setState(nextState) {
-    if (!Object.values(ORB_STATES).includes(nextState)) return;
-    if (nextState === currentState) {
-      bumpIdleTimer(nextState); // refresh timer on repeated events (e.g. continued audio deltas)
-      return;
-    }
-    currentState = nextState;
+  function setState(nextState, playing = false) {
     root.dataset.state = nextState;
+    root.dataset.playing = String(playing);
     root.style.setProperty("--glow", GLOW_BY_STATE[nextState]);
-    bumpIdleTimer(nextState);
-    onStateChange?.(nextState);
   }
 
-  function bumpIdleTimer(state) {
-    if (idleTimer != null) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-    }
-    const transient =
-      state === ORB_STATES.LISTENING ||
-      state === ORB_STATES.THINKING ||
-      state === ORB_STATES.SPEAKING;
-    if (!transient) return;
-    idleTimer = setTimeout(() => {
-      idleTimer = null;
-      setState(ORB_STATES.IDLE);
-    }, IDLE_FALLBACK_MS);
-  }
-
-  /** Stop any pending timer. Call before detaching the DOM node. */
-  function dispose() {
-    if (idleTimer != null) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-    }
-  }
-
-  return { root, setState, dispose };
-}
-
-// Indicators — stacked in the same grid cell, toggled via CSS data-state rules.
-
-function barsIndicator() {
-  return h(
-    "span",
-    { class: "ind ind-bars" },
-    h("span", { class: "bar" }),
-    h("span", { class: "bar" }),
-    h("span", { class: "bar" }),
-    h("span", { class: "bar" }),
-    h("span", { class: "bar" })
-  );
-}
-
-function thinkingDotsIndicator() {
-  return h(
-    "span",
-    { class: "ind ind-thinking" },
-    h("span", { class: "dot" }),
-    h("span", { class: "dot" }),
-    h("span", { class: "dot" })
-  );
+  return { root, setState };
 }
 
 function spinnerIndicator() {
   return h("span", { class: "ind ind-spinner" });
-}
-
-function voiceWaveIcon() {
-  return h("span", {
-    class: "ind ind-voice",
-    html: `
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M3 10v4a1 1 0 0 0 1 1h3l5 4V5L7 9H4a1 1 0 0 0-1 1z" fill="currentColor" stroke="none"/>
-        <path class="wave wave-1" d="M16 8a5 5 0 0 1 0 8"/>
-        <path class="wave wave-2" d="M19 5a9 9 0 0 1 0 14"/>
-      </svg>`,
-  });
 }
 
 function micIcon() {

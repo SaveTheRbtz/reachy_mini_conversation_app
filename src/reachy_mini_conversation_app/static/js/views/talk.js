@@ -1,37 +1,31 @@
-/**
- * Talk view: conversation orb driven by the RPC activity stream.
- * Audio I/O runs entirely in Python; the orb doubles as the mic toggle.
- * Robot stays live, tapping the orb only mutes or unmutes the user's mic.
- */
+/** Talk view: microphone control and playback status from the robot. */
 
-import { applyPersonality, getMicState, listPersonalities, setMicMuted, subscribe } from "../api.js";
+import { applyPersonality, getStatus, listPersonalities, setMicMuted, subscribe } from "../api.js";
 import { ORB_STATES } from "../constants.js";
-import { createOrb, mapActivityToState } from "../orb.js";
+import { createOrb } from "../orb.js";
 import { consumePendingApply } from "../pending-apply.js";
 import { setPersonality } from "../personality-badge.js";
 import { h, prettifyProfileName } from "../ui.js";
 
 const CAPTION_BY_STATE = Object.freeze({
-  [ORB_STATES.MUTED]: "Muted",
-  [ORB_STATES.IDLE]: "Ready",
+  [ORB_STATES.MUTED]: "Microphone muted",
+  [ORB_STATES.IDLE]: "Microphone on",
   [ORB_STATES.CONNECTING]: "Connecting to OpenAI Live...",
-  [ORB_STATES.LISTENING]: "Listening",
-  [ORB_STATES.THINKING]: "Thinking",
-  [ORB_STATES.SPEAKING]: "Speaking",
   [ORB_STATES.ERROR]: "Connection error",
 });
 
 export async function mountTalkView({ outlet, signal }) {
   const pending = consumePendingApply();
-  const micStatePromise = getMicState().catch((error) => {
-    console.warn("Failed to load microphone state", error);
-    return null;
-  });
   let muted = false;
   let micReady = false;
   let togglePending = false;
   let activePersonality = null;
-  let subscription = null;
+  let connectionState = ORB_STATES.CONNECTING;
+  let playing = false;
+  let connectionVersion = 0;
+  let playbackVersion = 0;
+  let statusRequest = null;
+  const subscriptions = [];
 
   const caption = h(
     "p",
@@ -43,12 +37,7 @@ export async function mountTalkView({ outlet, signal }) {
     defaultAction.hidden = true;
     defaultAction.addEventListener("click", onSetDefault);
   }
-  const orb = createOrb({
-    initialState: ORB_STATES.CONNECTING,
-    onStateChange: (state) => {
-      caption.textContent = CAPTION_BY_STATE[state] || "";
-    },
-  });
+  const orb = createOrb({ initialState: ORB_STATES.CONNECTING });
   orb.root.disabled = true;
   orb.root.addEventListener("click", onMicTap);
   syncMicAria();
@@ -74,7 +63,6 @@ export async function mountTalkView({ outlet, signal }) {
       return;
     }
     if (signal.aborted) return;
-    // The activity subscription will flip the orb to its resting state next tick.
     caption.textContent = CAPTION_BY_STATE[ORB_STATES.CONNECTING];
     void refreshPersonalityState();
   } else {
@@ -82,51 +70,91 @@ export async function mountTalkView({ outlet, signal }) {
     void refreshPersonalityState();
   }
 
-  const micState = await micStatePromise;
-  if (micState) muted = Boolean(micState.muted);
-  if (signal.aborted) return;
-  micReady = true;
-  orb.root.disabled = false;
-  syncMicAria();
-
-  subscription = subscribeConversationEvents({
-    // Re-sync mic state after subscribing: another tab may have toggled it.
-    onReady: async () => {
-      if (!togglePending) {
-        try {
-          muted = Boolean((await getMicState())?.muted);
-        } catch {
-          // keep the last known mute state
-        }
+  subscriptions.push(
+    subscribe("conversation.activity", ({ reason }) => {
+      switch (reason) {
+        case "connected":
+          connectionVersion++;
+          connectionState = ORB_STATES.IDLE;
+          break;
+        case "disconnected":
+          connectionVersion++;
+          playbackVersion++;
+          connectionState = ORB_STATES.ERROR;
+          playing = false;
+          break;
+        case "playback_started":
+        case "playback_stopped":
+          playbackVersion++;
+          playing = reason === "playback_started";
+          break;
+        default:
+          return;
       }
-      if (signal.aborted) return;
-      orb.setState(restingState());
-      caption.textContent = CAPTION_BY_STATE[restingState()];
-      syncMicAria();
-    },
-    onActivity: (reason) => {
-      if (muted) return;
-      const next = mapActivityToState(reason);
-      if (next == null) return;
-      orb.setState(next);
-    },
-  });
+      renderStatus();
+    }),
+    subscribe("rpc.connection", ({ connected }) => {
+      if (connected) {
+        void refreshStatus();
+      } else {
+        connectionVersion++;
+        playbackVersion++;
+        connectionState = ORB_STATES.ERROR;
+        playing = false;
+        renderStatus();
+      }
+    })
+  );
+  await refreshStatus();
 
   function cleanup() {
-    subscription?.close();
-    orb.dispose();
+    for (const unsubscribe of subscriptions) unsubscribe();
     if (defaultAction) {
       defaultAction.hidden = true;
       defaultAction.removeEventListener("click", onSetDefault);
     }
   }
 
-  function restingState() {
-    return muted ? ORB_STATES.MUTED : ORB_STATES.IDLE;
+  function refreshStatus() {
+    if (statusRequest) return statusRequest;
+    orb.root.disabled = true;
+    const requestedConnectionVersion = connectionVersion;
+    const requestedPlaybackVersion = playbackVersion;
+    statusRequest = getStatus().then((status) => {
+      if (signal.aborted) return;
+      if (connectionVersion === requestedConnectionVersion) {
+        connectionState = status.connected ? ORB_STATES.IDLE :
+          status.connection_state === "disconnected" ? ORB_STATES.ERROR : ORB_STATES.CONNECTING;
+      }
+      if (playbackVersion === requestedPlaybackVersion) playing = Boolean(status.playing);
+      if (!togglePending) muted = Boolean(status.muted);
+      micReady = true;
+      renderStatus();
+    }).catch((error) => {
+      console.warn("Failed to load conversation status", error);
+      if (signal.aborted || connectionVersion !== requestedConnectionVersion) return;
+      connectionState = ORB_STATES.ERROR;
+      if (playbackVersion === requestedPlaybackVersion) playing = false;
+      renderStatus();
+    }).finally(() => {
+      statusRequest = null;
+      orb.root.disabled = !micReady || togglePending;
+    });
+    return statusRequest;
+  }
+
+  function renderStatus() {
+    const state = connectionState === ORB_STATES.IDLE
+      ? (muted ? ORB_STATES.MUTED : ORB_STATES.IDLE) : connectionState;
+    const showingPlayback = connectionState === ORB_STATES.IDLE && playing;
+    orb.setState(state, showingPlayback);
+    caption.textContent = `${showingPlayback ? "Speaking · " : ""}${CAPTION_BY_STATE[state]}`;
+    orb.root.disabled = !micReady || togglePending || statusRequest !== null;
+    syncMicAria();
   }
 
   async function onMicTap() {
-    if (!micReady || togglePending) return;
+    if (!micReady || togglePending || statusRequest) return;
     togglePending = true;
     try {
       const data = await setMicMuted(!muted);
@@ -138,12 +166,10 @@ export async function mountTalkView({ outlet, signal }) {
       return;
     } finally {
       togglePending = false;
+      orb.root.disabled = !micReady || statusRequest !== null;
     }
     if (signal.aborted) return;
-    orb.setState(restingState());
-    // setState skips unchanged states, so set the caption explicitly
-    caption.textContent = CAPTION_BY_STATE[restingState()];
-    syncMicAria();
+    renderStatus();
   }
 
   async function refreshPersonalityState() {
@@ -199,26 +225,4 @@ async function fetchPersonalityState() {
   } catch {
     return null;
   }
-}
-
-function subscribeConversationEvents({ onActivity, onReady } = {}) {
-  if (typeof onActivity !== "function") {
-    throw new TypeError("subscribeConversationEvents: onActivity is required");
-  }
-
-  // Activity reasons now arrive as conversation.activity notifications over the
-  // /rpc WebSocket; the shared client (api.js) owns reconnection.
-  const unsubscribe = subscribe("conversation.activity", (params) => {
-    const reason = (params?.reason || "").trim();
-    if (reason) onActivity(reason);
-  });
-
-  // The socket connects lazily, so schedule the initial mic and orb sync.
-  if (typeof onReady === "function") Promise.resolve().then(onReady);
-
-  return {
-    close() {
-      unsubscribe();
-    },
-  };
 }

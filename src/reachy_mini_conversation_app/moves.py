@@ -5,20 +5,17 @@ Design overview
   sequentially.
 - There is a single control point to the robot: `ReachyMini.set_target`.
 - The control loop runs near 100 Hz and is phase-aligned via a monotonic clock.
-- Idle behaviour starts an infinite `BreathingMove` after a short inactivity delay
-  unless listening is active.
+- Idle behaviour starts an infinite `BreathingMove` after a short inactivity delay.
 
 Threading model
 - A dedicated worker thread owns all real-time state and issues `set_target`
   commands.
-- Other threads communicate via a command queue (enqueue moves, mark activity,
-  toggle listening).
+- Other threads communicate via a command queue (enqueue moves, toggle tracking).
 
 Units and frames
 - Antennas and `body_yaw` are in radians.
 
 Safety
-- Listening freezes antennas, then blends them back on unfreeze.
 - Interpolations and blends are used to avoid jumps at all times.
 - `set_target` errors are rate-limited in logs.
 """
@@ -169,8 +166,8 @@ class MovementManager:
     Responsibilities:
     - Own a real-time loop that samples the current primary move (if any) and calls
       `set_target` exactly once per tick.
-    - Start an idle `BreathingMove` after `idle_inactivity_delay` when not
-      listening and no moves are queued.
+    - Start an idle `BreathingMove` after `idle_inactivity_delay` when no moves
+      are queued.
     - Expose thread-safe APIs so other threads can enqueue moves or mark activity
       without touching internal state.
 
@@ -211,18 +208,10 @@ class MovementManager:
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        self._is_listening = False
         # Speaking pauses tracking; the captured look-at pose anchors queued moves.
         self._is_speaking = False
         self._track_anchor: NDArray[np.float64] | None = None
-        self._last_commanded_pose = clone_full_body_pose(initial_pose)
-        self._listening_antennas: tuple[float, float] = self._last_commanded_pose[1]
-        self._antenna_unfreeze_blend = 1.0
-        self._antenna_blend_duration = 0.4  # seconds to blend back after listening
-        self._last_listening_blend_time = self._now()
         self._breathing_active = False  # true when breathing move is running or queued
-        self._listening_debounce_s = 0.15
-        self._last_listening_toggle_time = self._now()
         self._last_set_target_err = 0.0
         self._set_target_err_interval = 1.0  # seconds between error logs
         self._set_target_err_suppressed = 0
@@ -247,18 +236,6 @@ class MovementManager:
         """
         self._command_queue.put(("clear_queue", None))
 
-    def set_listening(self, listening: bool) -> None:
-        """Enable or disable listening mode without touching shared state directly.
-
-        While listening:
-        - Antenna positions are frozen at the last commanded values.
-        - Blending is reset so that upon unfreezing the antennas return smoothly.
-        - Idle breathing is suppressed.
-
-        Thread-safe: the change is posted to the worker command queue.
-        """
-        self._command_queue.put(("set_listening", listening))
-
     def set_head_tracking(self, enabled: bool) -> None:
         """Start or stop following the user's face; thread-safe via the command queue."""
         self._command_queue.put(("set_head_tracking", enabled))
@@ -272,16 +249,16 @@ class MovementManager:
         """
         self._command_queue.put(("set_speaking", speaking))
 
-    def _poll_signals(self, current_time: float) -> None:
+    def _poll_signals(self) -> None:
         """Apply queued commands."""
         while True:
             try:
                 command, payload = self._command_queue.get_nowait()
             except Empty:
                 break
-            self._handle_command(command, payload, current_time)
+            self._handle_command(command, payload)
 
-    def _handle_command(self, command: str, payload: Move | bool | None, current_time: float) -> None:
+    def _handle_command(self, command: str, payload: Move | bool | None) -> None:
         """Handle a single cross-thread command."""
         if command == "queue_move":
             if isinstance(payload, Move):
@@ -308,29 +285,6 @@ class MovementManager:
             self.state.move_start_time = None
             self._breathing_active = False
             logger.info("Cleared move queue and stopped current move")
-        elif command == "set_listening":
-            desired_state = bool(payload)
-            now = self._now()
-            if now - self._last_listening_toggle_time < self._listening_debounce_s:
-                return
-            self._last_listening_toggle_time = now
-
-            if self._is_listening == desired_state:
-                return
-
-            self._is_listening = desired_state
-            self._last_listening_blend_time = now
-            if desired_state:
-                # Freeze: snapshot current commanded antennas and reset blend
-                self._listening_antennas = (
-                    float(self._last_commanded_pose[1][0]),
-                    float(self._last_commanded_pose[1][1]),
-                )
-                self._antenna_unfreeze_blend = 0.0
-            else:
-                # Unfreeze: restart blending from frozen pose
-                self._antenna_unfreeze_blend = 0.0
-            self.state.update_activity()
         elif command == "set_head_tracking":
             enabled = bool(payload)
             if self._head_tracking == enabled:
@@ -384,12 +338,7 @@ class MovementManager:
 
     def _manage_breathing(self, current_time: float) -> None:
         """Manage automatic breathing when idle."""
-        if (
-            self.state.current_move is None
-            and not self.move_queue
-            and not self._is_listening
-            and not self._breathing_active
-        ):
+        if self.state.current_move is None and not self.move_queue and not self._breathing_active:
             idle_for = current_time - self.state.last_activity_time
             if idle_for >= self.idle_inactivity_delay:
                 try:
@@ -469,42 +418,6 @@ class MovementManager:
         self._manage_move_queue(current_time)
         self._manage_breathing(current_time)
 
-    def _calculate_blended_antennas(self, target_antennas: tuple[float, float]) -> tuple[float, float]:
-        """Blend target antennas with listening freeze state and update blending."""
-        now = self._now()
-        listening = self._is_listening
-        listening_antennas = self._listening_antennas
-        blend = self._antenna_unfreeze_blend
-        blend_duration = self._antenna_blend_duration
-        last_update = self._last_listening_blend_time
-        self._last_listening_blend_time = now
-
-        if listening:
-            antennas_cmd = listening_antennas
-            new_blend = 0.0
-        else:
-            dt = max(0.0, now - last_update)
-            if blend_duration <= 0:
-                new_blend = 1.0
-            else:
-                new_blend = min(1.0, blend + dt / blend_duration)
-            antennas_cmd = (
-                listening_antennas[0] * (1.0 - new_blend) + target_antennas[0] * new_blend,
-                listening_antennas[1] * (1.0 - new_blend) + target_antennas[1] * new_blend,
-            )
-
-        if listening:
-            self._antenna_unfreeze_blend = 0.0
-        else:
-            self._antenna_unfreeze_blend = new_blend
-            if new_blend >= 1.0:
-                self._listening_antennas = (
-                    float(target_antennas[0]),
-                    float(target_antennas[1]),
-                )
-
-        return antennas_cmd
-
     def _issue_control_command(
         self, head: NDArray[np.float64], antennas: tuple[float, float], body_yaw: float
     ) -> None:
@@ -522,8 +435,6 @@ class MovementManager:
                 self._last_set_target_err = now
             else:
                 self._set_target_err_suppressed += 1
-        else:
-            self._last_commanded_pose = clone_full_body_pose((head, antennas, body_yaw))
 
     def _update_frequency_stats(
         self,
@@ -647,7 +558,7 @@ class MovementManager:
             prev_loop_start = loop_start
 
             # 1) Poll external commands
-            self._poll_signals(loop_start)
+            self._poll_signals()
 
             # 2) Manage the primary move queue (start new move, end finished move, breathing)
             self._update_primary_motion(loop_start)
@@ -655,16 +566,13 @@ class MovementManager:
             # 3) Build the primary full-body pose for this tick
             head, antennas, body_yaw = self._get_primary_pose(loop_start)
 
-            # 4) Apply listening antenna freeze or blend-back
-            antennas_cmd = self._calculate_blended_antennas(antennas)
+            # 4) Single set_target call - the only control point
+            self._issue_control_command(head, antennas, body_yaw)
 
-            # 5) Single set_target call - the only control point
-            self._issue_control_command(head, antennas_cmd, body_yaw)
-
-            # 6) Adaptive sleep to align to next tick
+            # 5) Adaptive sleep to align to next tick
             sleep_time, freq_stats = self._schedule_next_tick(loop_start, freq_stats)
 
-            # 7) Periodic loop-frequency logging
+            # 6) Periodic loop-frequency logging
             self._maybe_log_frequency(loop_count, print_interval_loops, freq_stats)
 
             if sleep_time > 0:
