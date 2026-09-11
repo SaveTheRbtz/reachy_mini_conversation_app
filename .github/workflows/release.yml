@@ -21,8 +21,29 @@ jobs:
     environment: release
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          lfs: true
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Build wheel and source distribution
+        run: uv build
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes
+        run: gh release create "${GITHUB_REF_NAME}" dist/*.whl dist/*.tar.gz --verify-tag --generate-notes
