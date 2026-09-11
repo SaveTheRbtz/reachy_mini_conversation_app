@@ -23,7 +23,7 @@ def _conversation(output_rate: int = 24_000) -> LiveConversation:
     dependencies = SimpleNamespace(
         instance_path=None,
         memory=MemorySnapshot(memories=[]),
-        movement_manager=SimpleNamespace(set_listening=MagicMock(), set_speaking=MagicMock()),
+        movement_manager=SimpleNamespace(set_speaking=MagicMock()),
     )
     return LiveConversation(dependencies, voice="marin", output_sample_rate=output_rate)
 

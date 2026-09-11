@@ -9,7 +9,7 @@ import pytest
 from reachy_mini.utils import create_head_pose
 from reachy_mini.utils.interpolation import compose_world_offset
 from reachy_mini_conversation_app.moves import MovementManager
-from reachy_mini_conversation_app.dance_emotion_moves import EmotionQueueMove
+from reachy_mini_conversation_app.dance_emotion_moves import GotoQueueMove, EmotionQueueMove
 
 
 class _FakeMove:
@@ -52,6 +52,34 @@ def test_stop_can_skip_neutral_reset(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert manager._thread is None
     robot.goto_target.assert_not_called()
+
+
+def test_queued_antennas_move_and_idle_breathing_resumes() -> None:
+    """Commanded antennas reach the robot and resume breathing when the move finishes."""
+    robot = MagicMock()
+    head_pose = np.eye(4)
+    antennas = (0.4, -0.4)
+    robot.get_current_head_pose.return_value = head_pose
+    robot.get_current_joint_positions.return_value = ([0.0] * 6, list(antennas))
+    manager = MovementManager(robot)
+    manager.idle_inactivity_delay = 0.0
+    manager.queue_move(
+        GotoQueueMove(
+            target_head_pose=head_pose,
+            start_head_pose=head_pose,
+            target_antennas=antennas,
+            start_antennas=antennas,
+            duration=0.05,
+        )
+    )
+
+    manager.start()
+    try:
+        assert _wait_for(lambda: robot.set_target.called)
+        assert robot.set_target.call_args_list[0].kwargs["antennas"] == list(antennas)
+        assert _wait_for(lambda: not np.allclose(robot.set_target.call_args.kwargs["antennas"], antennas))
+    finally:
+        manager.stop(reset_to_neutral=False)
 
 
 def test_head_tracking_follows_speaking() -> None:

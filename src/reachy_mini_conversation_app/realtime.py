@@ -248,7 +248,6 @@ class LiveConversation:
                             if event.type == "session.started":
                                 self._connection = connection
                                 logger.info("Live session started: session_id=%s", event.session.id)
-                                self.dependencies.movement_manager.set_listening(True)
                                 self._mark_activity("connected")
                             elif event.type == "error":
                                 raise RuntimeError(
@@ -287,7 +286,6 @@ class LiveConversation:
                     self._pending_input = False
                     self._backend_commands.clear()
                     self.clear_playback()
-                    self.dependencies.movement_manager.set_listening(False)
                     self.dependencies.movement_manager.set_speaking(False)
                     self._connection = None
                     self._transport = None
@@ -412,7 +410,6 @@ class LiveConversation:
     def acknowledge_playback_end(self) -> None:
         """Mark listening when the local playback queue has drained."""
         self.dependencies.movement_manager.set_speaking(False)
-        self.dependencies.movement_manager.set_listening(True)
         self._mark_activity("listening")
 
     async def _handle_event(self, event: ServerEvent) -> None:

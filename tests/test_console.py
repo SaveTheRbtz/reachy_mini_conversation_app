@@ -176,7 +176,7 @@ async def test_capture_recovery_restarts_media_before_bounded_live_interruption(
     dependencies = SimpleNamespace(
         instance_path=None,
         memory=MemorySnapshot(memories=[]),
-        movement_manager=SimpleNamespace(set_listening=MagicMock(), set_speaking=MagicMock()),
+        movement_manager=SimpleNamespace(set_speaking=MagicMock()),
     )
     conversation = LiveConversation(dependencies, voice="gleam", output_sample_rate=48_000)
     conversation.output_queue.put_nowait(PlaybackAudio(np.ones(48_000, dtype=np.float32)))
@@ -302,7 +302,7 @@ async def test_play_loop_pushes_chunks_without_waiting_for_playback_tracking() -
 @pytest.mark.asyncio
 async def test_interruption_discards_old_tracking_before_new_audio() -> None:
     """Clear queued playback and let fresh Live audio reach the player promptly."""
-    movement_manager = SimpleNamespace(set_listening=MagicMock(), set_speaking=MagicMock())
+    movement_manager = SimpleNamespace(set_speaking=MagicMock())
     dependencies = SimpleNamespace(
         instance_path=None,
         send_image=None,
