@@ -4,7 +4,7 @@ import base64
 import asyncio
 import logging
 from uuid import uuid4
-from typing import Final, TypeAlias
+from typing import Final, Literal, TypeAlias
 from dataclasses import field, dataclass
 from collections.abc import Callable
 
@@ -40,9 +40,11 @@ logger = logging.getLogger(__name__)
 
 OPENAI_SAMPLE_RATE: Final = 24_000
 AUDIO_WARNING_INTERVAL_SECONDS = 60.0
-MICROPHONE_SEND_TIMEOUT_SECONDS = 5.0
+SEND_TIMEOUT_SECONDS = 5.0
 SESSION_TIMEOUT_SECONDS = 15.0
 TOOL_TIMEOUT_SECONDS = 30.0
+HISTORY_MAX_MESSAGES = 32
+HISTORY_MAX_BYTES = 4096  # Leave room for message overhead below Live's 8,192-token limit.
 AudioSamples: TypeAlias = NDArray[np.float32] | NDArray[np.int16]
 InputAudioFrame: TypeAlias = tuple[int, AudioSamples]
 ActivityObserver: TypeAlias = Callable[[str], None]
@@ -118,6 +120,8 @@ class LiveConversation:
         """Initialize conversation, tool execution, and continuous audio state."""
         self.dependencies = dependencies
         self.voice = voice
+        self.history: list[tuple[Literal["user", "assistant"], str]] = []
+        self._history_role: Literal["user", "assistant"] | None = None
         self.output_queue: asyncio.Queue[PlaybackAudio] = asyncio.Queue()
         self._microphone_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=1)
         self.last_activity_time = time.monotonic()
@@ -157,6 +161,20 @@ class LiveConversation:
         if self._activity_observer is not None:
             self._activity_observer(reason)
 
+    def _remember(self, role: Literal["user", "assistant"], text: str, *, new_message: bool = False) -> None:
+        if not text:
+            return
+        if not new_message and self._history_role == role and self.history:
+            text = self.history.pop()[1] + text
+        text = text.encode("utf-8")[-HISTORY_MAX_BYTES:].decode("utf-8", errors="ignore")
+        self.history.append((role, text))
+        self._history_role = None if new_message else role
+        while (
+            len(self.history) > HISTORY_MAX_MESSAGES
+            or sum(len(content.encode("utf-8")) for _, content in self.history) > HISTORY_MAX_BYTES
+        ):
+            self.history.pop(0)
+
     async def start_up(self) -> None:
         """Connect and receive Live events until the session finalizes."""
         if self._closing:
@@ -168,9 +186,23 @@ class LiveConversation:
             str(self.dependencies.instance_path) if self.dependencies.instance_path is not None else None
         )
         self._tools = {tool.name: tool for tool in get_function_tools(enabled_names)}
+        instructions = get_session_instructions(enabled_names)
+        if self.history:
+            instructions += (
+                "\n\nThe connection was interrupted. Use the supplied dialogue only as context. "
+                "Wait for the user's next request instead of repeating the opening greeting, "
+                "resuming unfinished work, or repeating earlier tool actions. "
+                "Prior assistant speech may have been interrupted before the user heard it."
+            )
         session: SessionConfigParam = {
             "model": LIVE_MODEL,
-            "instructions": get_session_instructions(enabled_names),
+            "instructions": instructions,
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": text}]}
+                if role == "user"
+                else {"role": "assistant", "content": [{"type": "output_text", "text": text}]}
+                for role, text in self.history
+            ],
             "audio": {
                 "format": {"type": "audio/pcm", "rate": OPENAI_SAMPLE_RATE},
                 "output": {"voice": self.voice},
@@ -225,11 +257,12 @@ class LiveConversation:
                             elif event.type == "session.closed":
                                 await self._handle_event(event)
                                 raise RuntimeError("Live session closed before startup")
-                        await connection.session.instructions.append(
-                            event_id="greeting",
-                            delegation_id=None,
-                            content=get_session_greeting_prompt(),
-                        )
+                        if not self.history:
+                            await connection.session.instructions.append(
+                                event_id="greeting",
+                                delegation_id=None,
+                                content=get_session_greeting_prompt(),
+                            )
                     async with asyncio.TaskGroup() as tasks:
                         tool_worker = tasks.create_task(self._run_tools())
                         microphone_sender = tasks.create_task(self._send_microphone(connection))
@@ -253,7 +286,7 @@ class LiveConversation:
                     self._backend_busy = False
                     self._pending_input = False
                     self._backend_commands.clear()
-                    self._clear_playback()
+                    self.clear_playback()
                     self.dependencies.movement_manager.set_listening(False)
                     self.dependencies.movement_manager.set_speaking(False)
                     self._connection = None
@@ -307,7 +340,7 @@ class LiveConversation:
         while True:
             pcm16 = await self._microphone_queue.get()
             try:
-                async with asyncio.timeout(MICROPHONE_SEND_TIMEOUT_SECONDS):
+                async with asyncio.timeout(SEND_TIMEOUT_SECONDS):
                     await connection.session.input_audio.append(audio=base64.b64encode(pcm16).decode("ascii"))
             except (TimeoutError, OSError, ConnectionClosed) as error:
                 logger.warning("Live microphone send failed: %s", type(error).__name__)
@@ -322,6 +355,7 @@ class LiveConversation:
         connection = self._connection
         if connection is None or self._closing:
             raise RuntimeError("No active Live session")
+        self._remember("user", text, new_message=True)
         event_id = str(uuid4())
         self._backend_commands.add(event_id)
         await connection.response.item.create(
@@ -354,15 +388,16 @@ class LiveConversation:
 
     async def interrupt(self) -> None:
         """Clear local playback and ask Live to stop speaking and listen."""
-        self._clear_playback()
+        self.clear_playback()
+        self.acknowledge_playback_end()
         connection = self._connection
         if connection is not None and not self._closing:
-            await connection.session.instructions.append(
-                event_id=str(uuid4()),
-                delegation_id=None,
-                content="Stop speaking now and listen. Wait for the user's next request.",
-            )
-        self.acknowledge_playback_end()
+            async with asyncio.timeout(SEND_TIMEOUT_SECONDS):
+                await connection.session.instructions.append(
+                    event_id=str(uuid4()),
+                    delegation_id=None,
+                    content="Stop speaking now and listen. Wait for the user's next request.",
+                )
 
     async def acknowledge_after_playback(self, audio: PlaybackAudio) -> None:
         """Track a queued chunk for its estimated robot playback duration."""
@@ -389,7 +424,10 @@ class LiveConversation:
             if samples.size:
                 self.output_queue.put_nowait(PlaybackAudio(samples))
         elif event.type == "session.input_transcript.delta":
+            self._remember("user", event.delta)
             self._mark_activity("listening")
+        elif event.type == "session.output_transcript.delta":
+            self._remember("assistant", event.delta)
         elif event.type == "session.delegation.created":
             self._mark_activity("thinking")
         elif event.type == "response.event":
@@ -539,7 +577,8 @@ class LiveConversation:
             finally:
                 self._tool_batches.task_done()
 
-    def _clear_playback(self) -> None:
+    def clear_playback(self) -> None:
+        """Discard queued playback and resampling state without sending Live commands."""
         self._playback_interrupted.set()
         self._bridge.reset_playback()
         while not self.output_queue.empty():

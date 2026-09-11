@@ -1,8 +1,10 @@
 import re
 import random
+import asyncio
 import logging
 import unicodedata
 from typing import Final
+from concurrent.futures import Future, ThreadPoolExecutor
 
 from agents import FunctionTool, RunContextWrapper, function_tool
 
@@ -221,7 +223,13 @@ def random_curated_emotion(available_emotions: list[str]) -> str:
     return random.choice(available_emotions)
 
 
-_recorded_moves: RecordedMoves | None = None
+_recorded_moves: Future[RecordedMoves] | None = None
+_emotion_loader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="emotion-loader")
+
+
+def _log_load_failure(loaded: asyncio.Future[RecordedMoves]) -> None:
+    if error := loaded.exception():
+        logger.error("Failed to load emotions: %s: %s", type(error).__name__, error)
 
 
 @function_tool(
@@ -236,15 +244,18 @@ async def play_emotion_tool(
     global _recorded_moves
     logger.info("Tool call: play_emotion emotion=%s", emotion)
     try:
-        if _recorded_moves is None:
-            _recorded_moves = RecordedMoves("pollen-robotics/reachy-mini-emotions-library")
-        emotion_names = _recorded_moves.list_moves()
+        if _recorded_moves is None or (_recorded_moves.done() and _recorded_moves.exception() is not None):
+            _recorded_moves = _emotion_loader.submit(RecordedMoves, "pollen-robotics/reachy-mini-emotions-library")
+        loaded = asyncio.wrap_future(_recorded_moves)
+        loaded.add_done_callback(_log_load_failure)
+        recorded_moves = await asyncio.shield(loaded)
+        emotion_names = recorded_moves.list_moves()
         if not emotion_names:
             return {"error": "No emotions are available"}
         emotion_name = resolve_emotion_name(emotion, emotion_names)
         if emotion_name is None:
             emotion_name = random_curated_emotion(emotion_names)
-        context.context.movement_manager.queue_move(EmotionQueueMove(emotion_name, _recorded_moves))
+        context.context.movement_manager.queue_move(EmotionQueueMove(emotion_name, recorded_moves))
         return {"status": "queued", "emotion": emotion_name}
     except Exception as error:
         logger.exception("Failed to play emotion")
