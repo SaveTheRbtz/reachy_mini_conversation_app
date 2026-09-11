@@ -35,10 +35,11 @@ def conversation() -> LiveConversation:
 @pytest_asyncio.fixture
 async def sdk_transport(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[ClientConnection, MagicMock]]:
     """Use the actual SDK and WebSocket lifecycle with a controllable socket transport."""
+    # Keep test deadlines above Windows' roughly 16 ms clock resolution.
     websocket = ClientConnection(
         ClientProtocol(parse_uri("wss://example.invalid/live"), state=OPEN),
         ping_interval=None,
-        close_timeout=0.01,
+        close_timeout=0.1,
     )
     websocket.process_event(Response(101, "Switching Protocols", Headers()))
     transport = MagicMock(spec=asyncio.Transport)
@@ -57,7 +58,7 @@ async def sdk_transport(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[
     websocket.connection_made(transport)
     monkeypatch.setattr("openai.lib._websocket._WebSocketConnect", AsyncMock(return_value=websocket))
     monkeypatch.setattr(realtime_module.config, "OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(realtime_module, "SESSION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(realtime_module, "SESSION_TIMEOUT_SECONDS", 0.1)
     try:
         yield websocket, transport
     finally:
