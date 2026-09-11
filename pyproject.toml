@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling==1.32.0"]
+build-backend = "hatchling.build"
 
 [project]
 name = "reachy_mini_conversation_app"
@@ -10,11 +10,13 @@ description = ""
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "connectrpc==0.12.1",
     "fastapi",
     "numpy",
     "openai[realtime]>=3.13.0",
     "openai-agents>=0.22.2",
     "pillow>=12.3.0",
+    "protobuf-py==0.4.0",
     "pydantic>=2.13.4",
     "python-dotenv",
     "scipy>=1.17.0",
@@ -26,10 +28,11 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-  "allure-pytest>=2.16.0",
+  "hatchling==1.32.0",
   "pytest",
   "pytest-asyncio",
   "pytest-cov>=7.1.0",
+  "pytest-socket>=0.7.0",
   "ruff>=0.15.20",
   "mypy>=2.2.0",
   "pre-commit",
@@ -40,8 +43,31 @@ reachy-mini-conversation-app = "reachy_mini_conversation_app.main:main"
 
 [tool.uv]
 exclude-newer = "7 days"
+# Basename globs also match refreshed dependencies under node_modules.
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "hatch_build.py" },
+  { file = "README.md" },
+  { file = "package.json" },
+  { file = "package-lock.json" },
+  { file = "buf.yaml" },
+  { file = "buf.gen.yaml" },
+  { file = "buf.lock" },
+  { file = "proto/**/*.proto" },
+  { file = "vite.config.ts" },
+  { file = "tsconfig.json" },
+  { file = "tsconfig.test.json" },
+  { file = "frontend/index.html" },
+  { file = "frontend/src/*.ts" },
+  { file = "frontend/src/*.vue" },
+  { file = "frontend/src/*.css" },
+  { file = "frontend/src/components/**/*" },
+  { file = "frontend/src/views/**/*" },
+  { file = "frontend/public/**/*" },
+]
 
 [tool.uv.exclude-newer-package]
+"connectrpc" = false
 "reachy-mini" = false
 "reachy-mini-dances-library" = false
 "openai-agents" = false
@@ -50,24 +76,49 @@ exclude-newer = "7 days"
 [project.entry-points."reachy_mini_apps"]
 reachy_mini_conversation_app = "reachy_mini_conversation_app.main:ReachyMiniConversationApp"
 
-[tool.setuptools]
-package-dir = { "" = "src" }
-include-package-data = true
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-reachy_mini_conversation_app = [
-  "static/**/*",
+[tool.hatch.build]
+artifacts = [
+  "src/reachy_mini_conversation_app/gen/**",
+  "src/reachy_mini_conversation_app/static/**",
+  "frontend/src/gen/**",
 ]
-reachy_talk_data = [
-  "profiles/**/*.md",
+
+[tool.hatch.build.hooks.custom]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reachy_mini_conversation_app", "src/reachy_talk_data"]
+
+[tool.hatch.build.targets.wheel.force-include]
+profiles = "reachy_talk_data/profiles"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/profiles",
+  "/frontend",
+  "/proto",
+  "/tests",
+  "/docs/assets",
+  "/pyproject.toml",
+  "/uv.lock",
+  "/hatch_build.py",
+  "/package*.json",
+  "/buf.*",
+  "/tsconfig*.json",
+  "/vite.config.ts",
+  "/playwright.config.ts",
+  "/vitest.config.ts",
+  "/.prettier*",
+  "/.env.example",
+  "/README.md",
+  "/CONTRIBUTING.md",
+  "/CODE_OF_CONDUCT.md",
+  "/LICENSE",
 ]
 
 [tool.ruff]
 line-length = 119
-exclude = [".venv", "dist", "build", "**/__pycache__", "*.egg-info", ".mypy_cache", ".pytest_cache"]
+exclude = [".venv", "dist", "build", "**/__pycache__", "*.egg-info", ".mypy_cache", ".pytest_cache", "src/reachy_mini_conversation_app/gen"]
 
 [tool.ruff.lint]
 select = [
@@ -101,7 +152,7 @@ line-ending = "auto"
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src/"]
+files = ["src/", "tests/", "hatch_build.py"]
 ignore_missing_imports = true
 strict = true
 show_error_codes = true
@@ -112,10 +163,19 @@ module = ["agents", "agents.*"]
 ignore_missing_imports = false
 
 [[tool.mypy.overrides]]
+module = ["reachy_mini_conversation_app.gen.reachy.conversation.v1.api_connect"]
+disable_error_code = ["type-arg"]
+
+[[tool.mypy.overrides]]
 module = ["reachy_mini", "reachy_mini.*", "reachy_mini_dances_library", "reachy_mini_dances_library.*", "soxr", "soxr.*"]
 follow_untyped_imports = true
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib --strict-config --strict-markers --allow-hosts=127.0.0.1,::1 --allow-unix-socket -m 'not live and not packaging'"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
-  "integration: opt-in tests that call paid external APIs",
+  "integration: local tests of production library and transport boundaries",
+  "packaging: clean source builds and installed distribution checks (requires build network access)",
+  "live: opt-in paid OpenAI evaluations; select explicitly with -m live",
 ]

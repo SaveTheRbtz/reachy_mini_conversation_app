@@ -1,19 +1,10 @@
-"""Pytest configuration for path setup."""
-
-import os
-import sys
-from pathlib import Path
+import pytest
 
 
-PROJECT_ROOT = Path(__file__).parents[1].resolve()
-SRC_PATH = PROJECT_ROOT / "src"
-if str(SRC_PATH) not in sys.path:
-    sys.path.insert(0, str(SRC_PATH))
-
-
-# Make tests reproducible by ignoring machine-specific profile/tool env config.
-# Without this, importing config during test collection can pick up a developer's
-# local .env and fail before tests run.
-os.environ["REACHY_MINI_SKIP_DOTENV"] = "1"
-os.environ.pop("REACHY_MINI_CUSTOM_PROFILE", None)
-os.environ.pop("OPENAI_VOICE", None)
+def pytest_configure(config: pytest.Config) -> None:
+    """Keep developer configuration out of test collection and restore it afterwards."""
+    environment = pytest.MonkeyPatch()
+    environment.setenv("REACHY_MINI_SKIP_DOTENV", "1")
+    for name in ("REACHY_MINI_CUSTOM_PROFILE", "OPENAI_VOICE", "REACHY_MINI_APP_TIMEOUT_MINUTES"):
+        environment.delenv(name, raising=False)
+    config.add_cleanup(environment.undo)

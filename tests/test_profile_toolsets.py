@@ -77,6 +77,22 @@ def test_default_profile_uses_canonical_storage_key(configured_profiles: Path) -
     assert read_profile_toolsets(instance_path).profiles == {"default": ["dance"]}
 
 
+@pytest.mark.parametrize(
+    "document",
+    ['{"version":', '{"version": 2, "profiles": {}}', '{"version": 1, "profiles": {"guide": false}}'],
+    ids=["invalid-json", "unsupported-version", "invalid-selection"],
+)
+def test_damaged_tool_settings_never_enable_profile_defaults(configured_profiles: Path, document: str) -> None:
+    """A corrupt tool restriction must fail closed instead of granting default tools."""
+    settings_path = get_profile_toolsets_path(configured_profiles)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(document, encoding="utf-8")
+
+    with pytest.raises(RuntimeError):
+        read_profile_tool_names("guide", configured_profiles)
+    assert settings_path.read_text(encoding="utf-8") == document
+
+
 def test_profile_can_disable_hosted_search(configured_profiles: Path) -> None:
     """Hosted search should follow the same profile settings as local function tools."""
     enabled = read_profile_tool_names("guide", configured_profiles)

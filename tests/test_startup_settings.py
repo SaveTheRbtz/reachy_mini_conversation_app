@@ -1,5 +1,9 @@
-"""Tests for persisted instance-local startup settings."""
+from pathlib import Path
 
+import pytest
+
+import reachy_mini_conversation_app.startup_settings as settings_module
+from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.startup_settings import (
     StartupSettings,
     read_startup_settings,
@@ -8,73 +12,68 @@ from reachy_mini_conversation_app.startup_settings import (
 )
 
 
-def test_write_and_read_startup_settings(tmp_path) -> None:
-    """Startup settings should round-trip through startup_settings.json."""
-    write_startup_settings(tmp_path, profile="sorry_bro", voice="shimmer")
+@pytest.mark.parametrize("standalone", [False, True], ids=["instance", "standalone"])
+def test_settings_persist_and_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, standalone: bool) -> None:
+    """Both launch modes persist preferences and restore defaults when cleared."""
+    monkeypatch.chdir(tmp_path)
+    instance = None if standalone else tmp_path
+    write_startup_settings(instance, profile="guide", voice="coral")
+    assert read_startup_settings(instance) == StartupSettings(profile="guide", voice="coral")
 
-    assert read_startup_settings(tmp_path) == StartupSettings(profile="sorry_bro", voice="shimmer")
-
-
-def test_load_startup_settings_into_runtime_applies_profile_when_no_env(monkeypatch, tmp_path) -> None:
-    """Startup settings should seed the runtime profile when no explicit env override exists."""
-    write_startup_settings(tmp_path, profile="sorry_bro", voice="shimmer")
-    applied_profiles: list[str | None] = []
-    monkeypatch.delenv("REACHY_MINI_CUSTOM_PROFILE", raising=False)
-    monkeypatch.setattr(
-        "reachy_mini_conversation_app.startup_settings.set_custom_profile",
-        lambda profile: applied_profiles.append(profile),
-    )
-
-    settings = load_startup_settings_into_runtime(tmp_path)
-
-    assert settings == StartupSettings(profile="sorry_bro", voice="shimmer")
-    assert applied_profiles == ["sorry_bro"]
+    write_startup_settings(instance, profile=None, voice=None)
+    assert read_startup_settings(instance) == StartupSettings()
 
 
-def test_load_startup_settings_into_runtime_saved_settings_override_instance_env(monkeypatch, tmp_path) -> None:
-    """Saved startup settings should override an instance-local profile env value."""
-    write_startup_settings(tmp_path, profile="sorry_bro", voice="shimmer")
-    applied_profiles: list[str | None] = []
-    monkeypatch.setenv("REACHY_MINI_CUSTOM_PROFILE", "env_profile")
-    monkeypatch.setattr(
-        "reachy_mini_conversation_app.startup_settings.set_custom_profile",
-        lambda profile: applied_profiles.append(profile),
-    )
-
-    settings = load_startup_settings_into_runtime(tmp_path)
-
-    assert settings == StartupSettings(profile="sorry_bro", voice="shimmer")
-    assert applied_profiles == ["sorry_bro"]
-
-
-def test_load_startup_settings_into_runtime_saved_settings_override_inherited_env(monkeypatch, tmp_path) -> None:
-    """Saved startup settings should override a profile inherited from another `.env`."""
-    write_startup_settings(tmp_path, profile="nature_documentarian", voice="cedar")
-    applied_profiles: list[str | None] = []
-    monkeypatch.setenv("REACHY_MINI_CUSTOM_PROFILE", "env_profile")
-    monkeypatch.setattr(
-        "reachy_mini_conversation_app.startup_settings.set_custom_profile",
-        lambda profile: applied_profiles.append(profile),
-    )
-
-    settings = load_startup_settings_into_runtime(tmp_path)
-
-    assert settings == StartupSettings(profile="nature_documentarian", voice="cedar")
-    assert applied_profiles == ["nature_documentarian"]
-
-
-def test_load_startup_settings_into_runtime_preserves_inherited_env_without_saved_settings(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("saved", "environment_profile", "expected"),
+    [
+        (True, None, "saved_guide"),
+        (True, "environment_guide", "saved_guide"),
+        (False, "environment_guide", "environment_guide"),
+        (False, None, None),
+    ],
+    ids=["saved", "saved-overrides-environment", "environment", "default"],
+)
+def test_startup_applies_profile_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    saved: bool,
+    environment_profile: str | None,
+    expected: str | None,
 ) -> None:
-    """Inherited env config should still apply when no startup settings have been saved."""
-    applied_profiles: list[str | None] = []
-    monkeypatch.setenv("REACHY_MINI_CUSTOM_PROFILE", "env_profile")
-    monkeypatch.setattr(
-        "reachy_mini_conversation_app.startup_settings.set_custom_profile",
-        lambda profile: applied_profiles.append(profile),
-    )
+    """Persisted preferences win, followed by the environment and bundled default."""
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", environment_profile)
+    if environment_profile is None:
+        monkeypatch.delenv("REACHY_MINI_CUSTOM_PROFILE", raising=False)
+    else:
+        monkeypatch.setenv("REACHY_MINI_CUSTOM_PROFILE", environment_profile)
+    if saved:
+        write_startup_settings(tmp_path, profile="saved_guide", voice="coral")
 
     settings = load_startup_settings_into_runtime(tmp_path)
 
-    assert settings == StartupSettings()
-    assert applied_profiles == []
+    assert config.REACHY_MINI_CUSTOM_PROFILE == expected
+    assert settings.voice == ("coral" if saved else None)
+
+
+def test_locked_profile_ignores_saved_preferences(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fixed launch profile cannot be replaced by instance preferences."""
+    monkeypatch.setattr(settings_module, "LOCKED_PROFILE", "locked_guide")
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "locked_guide")
+    write_startup_settings(tmp_path, profile="saved_guide", voice="coral")
+
+    assert load_startup_settings_into_runtime(tmp_path) == StartupSettings()
+    assert config.REACHY_MINI_CUSTOM_PROFILE == "locked_guide"
+
+
+@pytest.mark.parametrize(
+    "document", ['{"profile":', '["guide"]', b"\xff"], ids=["invalid-json", "wrong-shape", "invalid-utf8"]
+)
+def test_unreadable_settings_fall_back_with_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, document: str | bytes
+) -> None:
+    """Damaged local preferences must not prevent the application from starting."""
+    (tmp_path / "startup_settings.json").write_bytes(document.encode() if isinstance(document, str) else document)
+
+    assert read_startup_settings(tmp_path) == StartupSettings()
+    assert any(record.levelname == "WARNING" for record in caplog.records)

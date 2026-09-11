@@ -56,6 +56,7 @@ These are the cleanups we make in review over and over. Write code that wouldn't
 
 ## Tests
 
+- Read [`tests/README.md`](tests/README.md) before adding or restructuring tests; it defines coverage ownership and fixture rules.
 - **Test behavior, not private helpers.** The `tests/` tree mirrors `src/`.
 - **Cover the essential features, not every thin thing.** A good test fails when behavior breaks, not when you rename a variable.
 - A bug fix needs a regression test. A feature needs at least a happy-path test.
@@ -112,10 +113,17 @@ Architecture overview: [`README.md`](README.md#architecture).
 
 ## Commands
 
-Set up the environment per the [README installation guide](README.md#installation). With the venv active, run the tools directly. Run the full gate before handing work back. CI runs the same checks on Linux, macOS, and Windows:
+Set up the environment per the [README installation guide](README.md#installation). With the venv active, run the tools directly. Run the full gate before handing work back. CI runs on Linux:
 
 ```bash
-ruff check . --fix && ruff format . && mypy --pretty --show-error-codes && pytest tests/ -v
+ruff check . --fix
+ruff format .
+mypy --pretty --show-error-codes
+pytest
+pytest -m packaging
+npm test
+npm run test:e2e
+uv lock --check
 ```
 
 | Task        | Command                              |
@@ -123,25 +131,26 @@ ruff check . --fix && ruff format . && mypy --pretty --show-error-codes && pytes
 | Lint + fix  | `ruff check . --fix`                 |
 | Format      | `ruff format .`                      |
 | Type-check  | `mypy --pretty --show-error-codes`   |
-| Tests       | `pytest tests/ -v`                   |
+| Python tests | `pytest`                            |
+| Packaging   | `pytest -m packaging`                |
+| Frontend    | `npm test`                           |
+| Browser     | `npm run test:e2e`                    |
 | Run the app | `reachy-mini-conversation-app`       |
 
 If you change dependencies, keep `uv.lock` in sync by running `uv lock` (CI validates it).
 
 ## Continuous integration
 
-`.github/workflows/` holds eight live, load-bearing workflows. The first four gate every PR. The local gate above mirrors them, so green locally means green CI.
+`.github/workflows/` holds six workflows. Frontend, Ruff, Type check, Pytest, and uv.lock check gate every PR. The local gate above exercises the same checks.
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
+| **Frontend** (`frontend.yml`) | push, PR | format, types, schema/codegen, build, Vitest, Playwright |
 | **Ruff** (`lint.yml`) | push, PR | `ruff check` + format |
 | **Type check** (`typecheck.yml`) | push, PR | `mypy` strict |
-| **Pytest** (`pytest.yml`) | PR, push to `main` | tests on Linux, macOS, Windows |
+| **Pytest** (`pytest.yml`) | PR, push to `main` | behavior and packaging tests on Linux |
 | **uv.lock check** (`uv-lock-check.yml`) | PR | `uv.lock` matches `pyproject.toml` |
-| **Allure Report** (`allure.yml`) | push to `main`, manual | publishes test and coverage reports to GitHub Pages |
 | **Release** (`release.yml`) | tag `v*` | publishes the GitHub release |
-| **Sync to HF Space** (`sync-hf-space.yml`) | tag, manual | mirrors releases to the Hugging Face Space |
-| **PR Preview** (`pr-hf-space-preview.yml`) | PR | spins up a private preview Space per PR |
 
 ---
 

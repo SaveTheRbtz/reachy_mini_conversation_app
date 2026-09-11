@@ -3,13 +3,37 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc",
-    "check": "tsc --noEmit && tsc -p tsconfig.test.json",
-    "check:generated": "node --experimental-strip-types frontend/check-generated.ts",
-    "test": "npm run check && npm run build && node --experimental-strip-types --test frontend/tests/*.test.ts"
+    "predev": "npm run generate",
+    "dev": "vite",
+    "prebuild": "npm run generate",
+    "build": "vite build",
+    "precheck": "npm run generate",
+    "check": "prettier --check frontend vite.config.ts vitest.config.ts playwright.config.ts tsconfig*.json package.json && buf lint && vue-tsc --noEmit -p tsconfig.test.json",
+    "generate": "buf generate",
+    "test": "npm run check && npm run test:unit && npm run build && npm run test:integration",
+    "test:e2e": "playwright test",
+    "format": "prettier --write frontend vite.config.ts vitest.config.ts playwright.config.ts tsconfig*.json package.json",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration"
   },
   "devDependencies": {
+    "@bufbuild/buf": "1.72.0",
+    "@bufbuild/protoc-gen-es": "2.15.0",
+    "@playwright/test": "1.63.0",
     "@types/node": "22.20.2",
-    "typescript": "7.0.2"
+    "@vitejs/plugin-vue": "6.0.8",
+    "prettier": "3.9.6",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "vite": "8.3.0",
+    "vitest": "4.1.11",
+    "vue-tsc": "3.3.11"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.15.0",
+    "@connectrpc/connect": "2.2.0",
+    "@connectrpc/connect-web": "2.2.0",
+    "@tanstack/vue-query": "5.102.8",
+    "vue": "3.5.42",
+    "vue-router": "5.3.1"
   }
 }

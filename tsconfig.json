@@ -1,20 +1,20 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
+    "module": "ESNext",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": [],
+    "types": ["vite/client"],
     "rootDir": "frontend/src",
-    "outDir": "src/reachy_mini_conversation_app/static/js",
+    "noEmit": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
-    "rewriteRelativeImportExtensions": true,
-    "noEmitOnError": true,
-    "removeComments": true
+    "allowImportingTsExtensions": true,
+    "moduleResolution": "Bundler"
   },
-  "include": ["frontend/src/**/*.ts"]
+  "include": ["frontend/src/**/*.ts", "frontend/src/**/*.vue"],
+  "vueCompilerOptions": { "strictTemplates": true }
 }

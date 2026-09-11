@@ -6,7 +6,11 @@ import logging
 from pathlib import Path
 from dataclasses import dataclass
 
-from reachy_mini_conversation_app.config import LOCKED_PROFILE, set_custom_profile
+from reachy_mini_conversation_app.config import (
+    LOCKED_PROFILE,
+    TERMINAL_USER_PERSONALITIES_DIRECTORY,
+    set_custom_profile,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -30,17 +34,16 @@ def _normalize_optional_text(value: object) -> str | None:
     return normalized or None
 
 
-def _startup_settings_path(instance_path: str | Path | None) -> Path | None:
+def _startup_settings_path(instance_path: str | Path | None) -> Path:
     """Return the startup settings JSON path for an instance directory."""
-    if instance_path is None:
-        return None
-    return Path(instance_path) / STARTUP_SETTINGS_FILENAME
+    directory = Path(instance_path) if instance_path is not None else TERMINAL_USER_PERSONALITIES_DIRECTORY.parent
+    return directory / STARTUP_SETTINGS_FILENAME
 
 
 def read_startup_settings(instance_path: str | Path | None) -> StartupSettings:
     """Read startup settings from an instance-local JSON file."""
     settings_path = _startup_settings_path(instance_path)
-    if settings_path is None or not settings_path.exists():
+    if not settings_path.exists():
         return StartupSettings()
 
     try:
@@ -67,9 +70,6 @@ def write_startup_settings(
 ) -> None:
     """Persist startup settings in an instance-local JSON file."""
     settings_path = _startup_settings_path(instance_path)
-    if settings_path is None:
-        return
-
     settings = StartupSettings(
         profile=_normalize_optional_text(profile),
         voice=_normalize_optional_text(voice),
@@ -87,6 +87,7 @@ def write_startup_settings(
     if settings.voice is not None:
         payload["voice"] = settings.voice
 
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
 
 
@@ -97,7 +98,7 @@ def load_startup_settings_into_runtime(instance_path: str | Path | None) -> Star
 
     settings_path = _startup_settings_path(instance_path)
     settings = read_startup_settings(instance_path)
-    if settings_path is None or not settings_path.exists():
+    if not settings_path.exists():
         if os.getenv("REACHY_MINI_CUSTOM_PROFILE"):
             return StartupSettings(voice=settings.voice)
 

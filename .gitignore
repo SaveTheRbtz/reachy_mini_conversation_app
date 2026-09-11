@@ -34,6 +34,13 @@ coverage.xml
 
 # Frontend dependencies
 node_modules/
+test-results/
+playwright-report/
+
+# Generated API and packaged frontend
+frontend/src/gen/
+src/reachy_mini_conversation_app/gen/
+src/reachy_mini_conversation_app/static/
 
 # IDE
 .vscode/
@@ -74,3 +81,4 @@ external_content/external_tools/*
 external_content/user_personalities/
 external_content/installed_tool_spaces.json
 external_content/profile_toolsets.json
+external_content/startup_settings.json

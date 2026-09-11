@@ -1,0 +1,17 @@
+version: v2
+clean: true
+plugins:
+  - remote: buf.build/bufbuild/py:v0.4.0
+    revision: 2
+    out: src/reachy_mini_conversation_app/gen
+    include_imports: true
+  - remote: buf.build/connectrpc/py:v0.12.1
+    revision: 1
+    out: src/reachy_mini_conversation_app/gen
+  - local: [node, node_modules/@bufbuild/protoc-gen-es/bin/protoc-gen-es]
+    out: frontend/src/gen
+    opt:
+      - target=ts
+      - import_extension=ts
+      - erasable_syntax=true
+    include_imports: true
