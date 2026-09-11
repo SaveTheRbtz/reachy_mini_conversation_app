@@ -334,7 +334,7 @@ def test_project_file_paths_stay_within_windows_budget() -> None:
 
 
 def test_wheel_file_paths_stay_within_windows_budget(tmp_path: Path) -> None:
-    """Built wheel paths should stay below the agreed Windows budget."""
+    """A wheel built from the sdist includes SPA assets and fits the Windows path budget."""
     project_root = Path(__file__).parents[1].resolve()
     source_checkout = tmp_path / "checkout"
     dist_dir = tmp_path / "dist"
@@ -346,7 +346,7 @@ def test_wheel_file_paths_stay_within_windows_budget(tmp_path: Path) -> None:
 
     try:
         subprocess.run(
-            ["uv", "build", "--wheel", "--out-dir", str(dist_dir)],
+            ["uv", "build", "--out-dir", str(dist_dir)],
             cwd=source_checkout,
             check=True,
             capture_output=True,
@@ -354,13 +354,18 @@ def test_wheel_file_paths_stay_within_windows_budget(tmp_path: Path) -> None:
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         details = exc.stderr if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)
-        pytest.fail(f"Wheel build failed while checking Windows path budget: {details}")
+        pytest.fail(f"Distribution build failed while checking Windows path budget: {details}")
 
+    assert len(list(dist_dir.glob("*.tar.gz"))) == 1
     wheel_files = list(dist_dir.glob("*.whl"))
     assert len(wheel_files) == 1, f"Expected exactly one built wheel in {dist_dir}, found: {wheel_files}"
 
     with zipfile.ZipFile(wheel_files[0]) as archive:
         archived_paths = [PurePosixPath(info.filename) for info in archive.infolist() if not info.is_dir()]
+
+    for asset in (source_checkout / "src" / "reachy_mini_conversation_app" / "static").rglob("*"):
+        if asset.is_file():
+            assert PurePosixPath(asset.relative_to(source_checkout / "src").as_posix()) in archived_paths
 
     violations = []
     for path in archived_paths:
