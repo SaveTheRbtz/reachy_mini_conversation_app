@@ -31,14 +31,6 @@ We welcome all contributions: bug fixes, new features, documentation, testing, a
 - All releases are created from `main` using Git tags.
 - Development should happen on feature or fix branches and be merged into `main` via pull requests.
 
-### Hugging Face Space Mirror
-
-This project is mirrored to a Hugging Face Space.
-
-- Tagged releases are automatically synchronized to [pollen-robotics/reachy_mini_conversation_app](https://huggingface.co/spaces/pollen-robotics/reachy_mini_conversation_app)
-- This sync is handled by GitHub Actions and requires no manual steps.
-- Contributors do not need to interact with the Space on Hugging Face hub directly.
-
 ### 1. Create an Issue
 
 Open an issue first describing the bug fix, feature, or improvement you plan to work on.
