@@ -1,54 +1,41 @@
-/** Tiny DOM and display-name helpers. */
 export function h(tag, attrs = {}, ...children) {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(attrs || {})) {
-    if (value == null || value === false) continue;
-    if (key === "class") {
-      el.className = Array.isArray(value) ? value.filter(Boolean).join(" ") : String(value);
-    } else if (key === "style" && typeof value === "object") {
-      Object.assign(el.style, value);
-    } else if (key === "dataset" && typeof value === "object") {
-      for (const [dk, dv] of Object.entries(value)) {
-        if (dv != null) el.dataset[dk] = String(dv);
-      }
-    } else if (key.startsWith("on") && typeof value === "function") {
-      el.addEventListener(key.slice(2).toLowerCase(), value);
-    } else if (key === "html") {
-      // Escape hatch for trusted HTML (e.g. inline SVG icons we author).
-      el.innerHTML = String(value);
-    } else {
-      el.setAttribute(key, String(value));
+    const element = document.createElement(tag);
+    const { class: classes, style, dataset, html, onClick, ...attributes } = attrs ?? {};
+    if (classes)
+        element.className = typeof classes === "string" ? classes : classes.filter(Boolean).join(" ");
+    if (style)
+        for (const [name, value] of Object.entries(style))
+            element.style.setProperty(name, value);
+    if (dataset)
+        Object.assign(element.dataset, dataset);
+    if (html)
+        element.innerHTML = html;
+    if (onClick)
+        element.onclick = onClick;
+    for (const [name, value] of Object.entries(attributes)) {
+        if (value != null && value !== false)
+            element.setAttribute(name, String(value));
     }
-  }
-  appendChildren(el, children);
-  return el;
+    appendChildren(element, children);
+    return element;
 }
-
 function appendChildren(parent, children) {
-  for (const child of children.flat(Infinity)) {
-    if (child == null || child === false || child === true) continue;
-    if (child instanceof Node) {
-      parent.appendChild(child);
-    } else {
-      parent.appendChild(document.createTextNode(String(child)));
+    for (const child of children) {
+        if (child == null || typeof child === "boolean")
+            continue;
+        if (Array.isArray(child))
+            appendChildren(parent, child);
+        else
+            parent.append(child instanceof Node ? child : String(child));
     }
-  }
 }
-
-export function $(selector, root = document) {
-  return root.querySelector(selector);
-}
-
 export function prettifyProfileName(name) {
-  const stripped = name.replace(/^user_personalities\//, "");
-  return stripped
-    .split(/[_-]/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
+    return name.replace(/^user_personalities\//, "")
+        .split(/[_-]/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
 }
-
 export function prettifyToolName(toolId) {
-  const leafName = toolId.includes("__") ? toolId.split("__").at(-1) : toolId;
-  return prettifyProfileName(leafName);
+    return prettifyProfileName(toolId.split("__").at(-1) ?? toolId);
 }

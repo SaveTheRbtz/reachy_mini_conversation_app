@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "frontend",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["frontend/src/**/*.ts", "frontend/tests/**/*.ts"]
+}

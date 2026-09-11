@@ -169,6 +169,21 @@ Python tools are intentionally not dynamically loaded. Add a new tool as an Agen
 
 ## Development
 
+The browser UI is written in strict TypeScript under `frontend/src/`. Its RPC contract lives in
+`frontend/src/contracts.ts`; the Python routes define the corresponding server responses. DOM modules compile
+directly to the packaged `src/reachy_mini_conversation_app/static/js/` files. Edit the TypeScript sources and
+commit the generated JavaScript with them. Running or installing the Python app does not require Node.js.
+
+For UI development, install Node.js 22 or newer and the pinned compiler, then build and test:
+
+```bash
+npm ci
+npm test
+```
+
+`npm run check` checks types without emitting files; `npm run build` regenerates the browser modules.
+After committing, `npm run check:generated` verifies that the generated files match their sources.
+
 Run the complete local gate before review:
 
 ```bash
