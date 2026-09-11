@@ -126,11 +126,41 @@ test("timeouts release requests and late responses cannot settle a newer request
   assert.deepEqual(await nextRequest, { voice: "marin" });
 });
 
-test("disconnect rejects pending calls and subscriptions resume on reconnect", async (context) => {
+test("stalled opening rejects all waiting calls and permits a fresh connection", async (context) => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
+  context.mock.method(console, "warn", () => {});
+  const connections: boolean[] = [];
+  cleanup.push(api.subscribe("rpc.connection", ({ connected }) => connections.push(connected)));
+  const voice = api.rpcCall("voices.current");
+  const microphone = api.rpcCall("conversation.mic");
+  const rejectedVoice = assert.rejects(voice, { reason: "timeout" });
+  const rejectedMicrophone = assert.rejects(microphone, { reason: "timeout" });
+  const [stalled] = FakeWebSocket.instances;
+  assert.ok(stalled);
+  context.mock.timers.tick(8000);
+  await Promise.all([rejectedVoice, rejectedMicrophone]);
+  assert.equal(stalled.readyState, 3);
+  const retry = api.rpcCall("voices.current");
+  const replacement = FakeWebSocket.instances[1];
+  assert.ok(replacement);
+  replacement.open();
+  await Promise.resolve();
+  stalled.onopen?.();
+  stalled.onclose?.();
+  assert.deepEqual(connections, [false, true]);
+  const [request] = replacement.sent;
+  assert.ok(request);
+  replacement.receive({ id: request.id, result: { voice: "marin" } });
+  assert.deepEqual(await retry, { voice: "marin" });
+});
+
+test("disconnect rejects pending calls and subscriptions retry failed reconnects", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const warning = context.mock.method(console, "warn", () => {});
   const connections: boolean[] = [];
   const activity: string[] = [];
-  cleanup.push(api.subscribe("rpc.connection", ({ connected }) => connections.push(connected)));
+  const stopConnection = api.subscribe("rpc.connection", ({ connected }) => connections.push(connected));
+  cleanup.push(stopConnection);
   const stopActivity = api.subscribe("conversation.activity", ({ reason }) => activity.push(reason));
   cleanup.push(stopActivity);
   const [socket] = FakeWebSocket.instances;
@@ -144,15 +174,59 @@ test("disconnect rejects pending calls and subscriptions resume on reconnect", a
   socket.close();
   await rejected;
   context.mock.timers.tick(1000);
-  const replacement = FakeWebSocket.instances[1];
+  const failedRetry = FakeWebSocket.instances[1];
+  assert.ok(failedRetry);
+  failedRetry.close();
+  await Promise.resolve();
+  assert.equal(warning.mock.callCount(), 1);
+  context.mock.timers.tick(1000);
+  const replacement = FakeWebSocket.instances[2];
   assert.ok(replacement);
   replacement.open();
   replacement.receive({ method: "conversation.activity", params: { reason: "playback_stopped" } });
-  assert.deepEqual(connections, [true, false, true]);
+  assert.deepEqual(connections, [true, false, false, true]);
   assert.deepEqual(activity, ["playback_started", "playback_stopped"]);
   stopActivity();
   replacement.receive({ method: "conversation.activity", params: { reason: "playback_started" } });
   assert.deepEqual(activity, ["playback_started", "playback_stopped"]);
+  replacement.close();
+  stopConnection();
+  context.mock.timers.tick(1000);
+  assert.equal(FakeWebSocket.instances.length, 3);
+});
+
+test("malformed frames are logged without losing a valid response", async (context) => {
+  const warning = context.mock.method(console, "warn", () => {});
+  const request = api.rpcCall("voices.current");
+  const [socket] = FakeWebSocket.instances;
+  assert.ok(socket);
+  socket.open();
+  await Promise.resolve();
+  socket.onmessage?.({ data: "invalid json" });
+  socket.receive(null);
+  assert.equal(warning.mock.callCount(), 2);
+  const [sentRequest] = socket.sent;
+  assert.ok(sentRequest);
+  socket.receive({ id: sentRequest.id, result: { voice: "marin" } });
+  assert.deepEqual(await request, { voice: "marin" });
+});
+
+test("send failures reject immediately and the next request can succeed", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const request = api.rpcCall("voices.current");
+  const [socket] = FakeWebSocket.instances;
+  assert.ok(socket);
+  const send = context.mock.method(socket, "send", () => { throw new Error("Send failed"); });
+  socket.open();
+  await assert.rejects(request, /Send failed/);
+  send.mock.restore();
+  const nextRequest = api.rpcCall("voices.current");
+  await Promise.resolve();
+  const [sentRequest] = socket.sent;
+  assert.ok(sentRequest);
+  socket.receive({ id: sentRequest.id, result: { voice: "marin" } });
+  assert.deepEqual(await nextRequest, { voice: "marin" });
+  context.mock.timers.tick(8000);
 });
 
 test("startup retries return the eventual value and stop after a view aborts", async (context) => {

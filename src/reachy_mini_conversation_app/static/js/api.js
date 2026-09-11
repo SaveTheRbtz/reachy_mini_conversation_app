@@ -24,17 +24,36 @@ function connect() {
     if (connecting)
         return connecting;
     connecting = new Promise((resolve, reject) => {
-        let opened = false;
         const ws = new WebSocket(RPC_URL);
         socket = ws;
+        const openingTimer = setTimeout(() => {
+            reject(new RpcError("timed out connecting to /rpc", "timeout"));
+            disconnected();
+            ws.close();
+        }, DEFAULT_TIMEOUT_MS);
         ws.onopen = () => {
-            opened = true;
+            if (socket !== ws)
+                return;
+            clearTimeout(openingTimer);
             connecting = null;
             resolve();
             notify("rpc.connection", { connected: true });
         };
-        ws.onmessage = (event) => handleMessage(event.data);
-        ws.onclose = () => {
+        ws.onmessage = (event) => {
+            if (socket !== ws)
+                return;
+            try {
+                handleMessage(event.data);
+            }
+            catch (error) {
+                console.warn("Invalid RPC message:", error);
+            }
+        };
+        ws.onclose = disconnected;
+        function disconnected() {
+            clearTimeout(openingTimer);
+            if (socket !== ws)
+                return;
             socket = null;
             connecting = null;
             for (const request of pending.values()) {
@@ -43,14 +62,15 @@ function connect() {
             }
             pending.clear();
             notify("rpc.connection", { connected: false });
-            if (!opened)
-                reject(new RpcError("cannot reach /rpc", "disconnected"));
-            else if (Object.values(subscribers).some((callbacks) => callbacks.size > 0)) {
+            reject(new RpcError("cannot reach /rpc", "disconnected"));
+            if (Object.values(subscribers).some((callbacks) => callbacks.size > 0)) {
                 setTimeout(() => {
-                    connect().catch((error) => console.warn("RPC reconnect failed:", error));
+                    if (Object.values(subscribers).some((callbacks) => callbacks.size > 0)) {
+                        connect().catch((error) => console.warn("RPC reconnect failed:", error));
+                    }
                 }, 1000);
             }
-        };
+        }
     });
     return connecting;
 }
@@ -101,7 +121,14 @@ export async function rpcCall(method, ...args) {
             reject,
             timer,
         });
-        ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+        try {
+            ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+        }
+        catch (error) {
+            pending.delete(id);
+            clearTimeout(timer);
+            reject(error);
+        }
     });
 }
 export function subscribe(method, callback) {
