@@ -263,6 +263,8 @@ class LocalStream:
                 self._connection_error = f"{OPENAI_API_KEY_ENV} is not configured"
                 await self._wait_for_restart(0.5)
                 continue
+            if self._restart_requested.is_set():
+                conversation.history.clear()
             self._restart_requested.clear()
             if conversation.voice != self._voice:
                 conversation = self._conversation_factory(self._voice)
@@ -303,9 +305,11 @@ class LocalStream:
                 )
             if self._stop_event.is_set():
                 return
+            history = conversation.history.copy()
             conversation = self._conversation_factory(self._voice)
             if self._restart_requested.is_set():
                 continue
+            conversation.history = history
             logger.info("Live reconnect scheduled: delay=%.1fs", RETRY_DELAY_SECONDS)
             await self._wait_for_restart(RETRY_DELAY_SECONDS)
 
@@ -435,10 +439,7 @@ class LocalStream:
                     )
                     last_warning_at = now
                     capture_stalled = True
-                    try:
-                        await self._conversation.interrupt()
-                    except Exception as error:
-                        logger.warning("Failed to interrupt playback before robot media restart: %s", error)
+                    self._conversation.clear_playback()
                     try:
                         self._robot.media.stop_recording()
                         self._robot.media.start_recording()
