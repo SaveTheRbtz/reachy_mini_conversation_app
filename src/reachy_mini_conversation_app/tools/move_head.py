@@ -21,7 +21,7 @@ HEAD_DELTAS: Final[dict[Direction, tuple[int, int, int, int, int, int]]] = {
 
 @function_tool(
     name_override="move_head",
-    description_override="Move the robot's head left, right, up, down, or to the front.",
+    description_override="Look left, right, up, down, or straight ahead by moving the robot's head.",
 )
 async def move_head_tool(context: RunContextWrapper[ToolDependencies], direction: Direction) -> ToolResult:
     """Queue a short directional head movement."""

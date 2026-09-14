@@ -115,6 +115,8 @@ fail immediately if credentials are absent; ordinary test commands never select 
 key into a command example or committed configuration. Live failures need investigation of the prompt,
 model, service, and application; they are not deterministic PR gates.
 
+Live microphone tests replay synthetic Ogg fixtures (about 50 kbit/s) through the production audio path.
+
 Before review, run Ruff checks/formatting, strict mypy, `pytest`, `pytest -m packaging`, `npm test`,
 `npm run test:e2e`, and `uv lock --check`. CI runs on Linux, with separate Python behavior and packaging
 steps alongside frontend checks, unit, cross-language, and browser tests.

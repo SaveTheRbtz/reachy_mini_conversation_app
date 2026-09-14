@@ -1,4 +1,5 @@
 import asyncio
+from time import monotonic
 from pathlib import Path
 from contextlib import asynccontextmanager
 from unittest.mock import MagicMock
@@ -6,6 +7,8 @@ from collections.abc import Callable, AsyncIterator
 
 import numpy as np
 import pytest
+import soundfile
+from numpy.typing import NDArray
 from scipy.signal import resample_poly
 from openai.types.live.server_event import ServerEvent
 
@@ -14,7 +17,7 @@ from reachy_mini_conversation_app.moves import MovementManager
 from reachy_mini_conversation_app.config import get_default_voice
 from reachy_mini_conversation_app.memory import load_memory
 from reachy_mini_conversation_app.realtime import OPENAI_SAMPLE_RATE, LiveConversation
-from reachy_mini_conversation_app.tools.types import ToolDependencies
+from reachy_mini_conversation_app.tools.types import SleepCallback, ToolDependencies
 
 
 SESSION_TIMEOUT_SECONDS = 90
@@ -30,17 +33,22 @@ class ObservedConversation(LiveConversation):
         """Collect externally visible conversation outcomes."""
         super().__init__(dependencies, voice=get_default_voice(), output_sample_rate=REACHY_SAMPLE_RATE)
         self.transcript = ""
+        self.reply_transcript = ""
         self.input_transcript = ""
         self.backend_transcript = ""
         self.backend_completions = 0
         self.hosted_searches = 0
         self.errors: list[str] = []
         self.played_samples = 0
+        self.last_transcript_at = 0.0
         self.finalized = False
 
     async def _handle_event(self, event: ServerEvent) -> None:
         if event.type == "session.output_transcript.delta":
+            self.last_transcript_at = monotonic()
             self.transcript += event.delta
+            if self.input_transcript:
+                self.reply_transcript += event.delta
         elif event.type == "session.input_transcript.delta":
             self.input_transcript += event.delta
         elif event.type == "response.event" and event.event.get("type") == "response.completed":
@@ -60,12 +68,13 @@ class ObservedConversation(LiveConversation):
         await super()._handle_event(event)
 
 
-async def _stream_microphone(conversation: LiveConversation, fixture: Path | None) -> None:
+async def _stream_microphone(
+    conversation: LiveConversation, recording: NDArray[np.float32] | None, lead_in_s: float
+) -> None:
     silence = np.zeros((MICROPHONE_CHUNK_SAMPLES, 2), dtype=np.float32)
-    frames = np.zeros((REACHY_SAMPLE_RATE // 2, 2), dtype=np.float32)
-    if fixture is not None:
-        pcm = np.frombuffer(fixture.read_bytes(), dtype="<i2").astype(np.float32) / 32768.0
-        mono = np.asarray(resample_poly(pcm, REACHY_SAMPLE_RATE, OPENAI_SAMPLE_RATE), dtype=np.float32)
+    frames = np.zeros((int(REACHY_SAMPLE_RATE * lead_in_s), 2), dtype=np.float32)
+    if recording is not None:
+        mono = np.asarray(resample_poly(recording, REACHY_SAMPLE_RATE, OPENAI_SAMPLE_RATE), dtype=np.float32)
         frames = np.concatenate((frames, np.column_stack((mono, mono))))
     for offset in range(0, frames.shape[0], MICROPHONE_CHUNK_SAMPLES):
         frame = frames[offset : offset + MICROPHONE_CHUNK_SAMPLES]
@@ -89,10 +98,22 @@ async def _play_audio(conversation: ObservedConversation) -> None:
 
 @asynccontextmanager
 async def live_session(
-    tmp_path: Path, fixture: Path | None = None, camera_frame: np.ndarray | None = None
+    tmp_path: Path,
+    fixture: Path | None = None,
+    camera_frame: np.ndarray | None = None,
+    *,
+    lead_in_s: float = 6.5,
+    go_to_sleep: SleepCallback | None = None,
 ) -> AsyncIterator[ObservedConversation]:
     """Run the real Live session with simulated hardware and joined audio workers."""
+    recording = None
+    if fixture is not None:
+        recording, sample_rate = soundfile.read(fixture, dtype="float32")
+        assert sample_rate == OPENAI_SAMPLE_RATE
+        assert recording.ndim == 1
     robot = MagicMock(spec=ReachyMini)
+    robot.get_current_head_pose.return_value = np.eye(4)
+    robot.get_current_joint_positions.return_value = ([0.0] * 7, [0.0, 0.0])
     if camera_frame is not None:
         robot.media.get_frame.return_value = camera_frame
     dependencies = ToolDependencies(
@@ -100,6 +121,7 @@ async def live_session(
         movement_manager=MagicMock(spec=MovementManager),
         memory=load_memory(tmp_path),
         instance_path=tmp_path,
+        go_to_sleep=go_to_sleep,
     )
     conversation = ObservedConversation(dependencies)
     async with asyncio.TaskGroup() as tasks:
@@ -113,7 +135,7 @@ async def live_session(
                         pytest.fail("Live session closed before startup")
                     await asyncio.sleep(0.01)
                 workers = [
-                    tasks.create_task(_stream_microphone(conversation, fixture)),
+                    tasks.create_task(_stream_microphone(conversation, recording, lead_in_s)),
                     tasks.create_task(_play_audio(conversation)),
                 ]
                 yield conversation
@@ -139,3 +161,17 @@ async def wait_for_content(conversation: ObservedConversation, predicate: Callab
         assert conversation.connected
         await asyncio.sleep(0.05)
     return conversation.transcript
+
+
+async def wait_for_reply(conversation: ObservedConversation) -> str:
+    """Wait for the spoken reply transcript to settle before assessing it."""
+    # Live has no turn-done event and continues audio, so evaluations observe transcript quiet.
+    while (
+        not conversation.reply_transcript.strip()
+        or conversation.played_samples == 0
+        or monotonic() - conversation.last_transcript_at < 3.0
+    ):
+        assert not conversation.errors
+        assert conversation.connected
+        await asyncio.sleep(0.05)
+    return conversation.reply_transcript

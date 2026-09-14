@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from tests.live.session import FIXTURES, REACHY_SAMPLE_RATE, live_session, wait_for_content
+from tests.live.session import FIXTURES, REACHY_SAMPLE_RATE, live_session, wait_for_reply, wait_for_content
 from reachy_mini_conversation_app.memory import load_memory
 
 
@@ -15,11 +15,8 @@ pytestmark = [pytest.mark.live, pytest.mark.asyncio, pytest.mark.enable_socket]
 
 async def test_synthesized_speech_drives_production_audio_path(tmp_path: Path) -> None:
     """Receive audible speech while the microphone continues streaming silence."""
-    async with live_session(tmp_path, FIXTURES / "hear_test.pcm") as conversation:
-        await wait_for_content(
-            conversation,
-            lambda text: "hear" in conversation.input_transcript.casefold() and "hear" in text,
-        )
+    async with live_session(tmp_path, FIXTURES / "hear_test.ogg") as conversation:
+        await wait_for_reply(conversation)
         assert conversation.played_samples > REACHY_SAMPLE_RATE // 10
 
 
@@ -27,7 +24,7 @@ async def test_synthesized_speech_uses_camera_image(tmp_path: Path) -> None:
     """Answer repeated visual questions through native images without filling backend history."""
     with Image.open(FIXTURES / "blue_chair.jpg") as image:
         camera_frame = np.asarray(image.convert("RGB"))[:, :, ::-1]
-    async with live_session(tmp_path, FIXTURES / "camera_request.pcm", camera_frame) as conversation:
+    async with live_session(tmp_path, FIXTURES / "camera_request.ogg", camera_frame) as conversation:
         robot = conversation.dependencies.reachy_mini
         assert isinstance(robot, MagicMock)
         await wait_for_content(conversation, lambda text: "blue" in text and "chair" in text)

@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 @function_tool(
     name_override="stop_dance",
-    description_override="Stop the current dance and clear queued robot movement.",
+    description_override="Stop the robot's dance or other body movements.",
 )
 async def stop_dance_tool(context: RunContextWrapper[ToolDependencies]) -> ToolResult:
     """Stop the current dance."""
