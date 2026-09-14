@@ -66,7 +66,7 @@ only until the app stops. The Reachy Mini app launcher saves UI keys for later r
 
 Conversation audio, text, and requested camera images go to OpenAI. Saved memories
 stay on your machine and are sent to OpenAI as conversation context. Memory is
-shared across personalities; Reachy does not identify speakers.
+shared across personalities.
 
 Ask Reachy to remember, correct, or forget a preference. To erase all saved memory,
 stop the app and delete `memory.json` from its instance directory. For standalone
