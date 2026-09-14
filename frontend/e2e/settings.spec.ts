@@ -53,7 +53,7 @@ test("voice preferences persist and can return to the personality default", asyn
     .poll(async () => (await request.get("/__test/state")).json())
     .toMatchObject({
       startup_settings: { voice: null },
-      conversation: { voice: "gleam" },
+      conversation: { voice: "meridian" },
     });
   await page.reload();
   await expect(page.getByLabel("Voice", { exact: true })).toHaveValue("");

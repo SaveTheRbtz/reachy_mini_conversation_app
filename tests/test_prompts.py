@@ -99,7 +99,7 @@ def test_session_voice_defaults_to_openai_voice(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", None)
     monkeypatch.delenv(config_mod.OPENAI_VOICE_ENV, raising=False)
 
-    assert prompts_mod.get_session_voice() == "gleam"
+    assert prompts_mod.get_session_voice() == "meridian"
 
 
 def test_session_greeting_prompt_loads_from_selected_profile(

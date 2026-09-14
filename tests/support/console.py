@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, create_autospec
 
 from reachy_mini import ReachyMini
 from reachy_mini.io.ws_client import WSClient
+from reachy_mini_conversation_app.config import DEFAULT_VOICE
 from reachy_mini_conversation_app.realtime import LiveConversation
 
 
@@ -18,7 +19,7 @@ def make_robot() -> MagicMock:
 def make_conversation() -> MagicMock:
     """Isolate the stream owner while checking its public conversation calls."""
     conversation: MagicMock = create_autospec(LiveConversation, instance=True)
-    conversation.voice = "gleam"
+    conversation.voice = DEFAULT_VOICE
     conversation.history = []
     conversation.connected = True
     conversation.output_queue = asyncio.Queue()
