@@ -7,7 +7,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from reachy_mini.utils import create_head_pose
-from tests.live.session import FIXTURES, live_session, wait_for_content
+from tests.live.session import FIXTURES, live_session, wait_for_reply, wait_for_content
 from reachy_mini.motion.recorded_move import RecordedMoves
 import reachy_mini_conversation_app.tools.play_emotion as emotion_module
 from reachy_mini_conversation_app.config import DELEGATION_MODEL, config
@@ -141,10 +141,7 @@ async def test_spoken_question_about_dancing_does_not_move_robot(tmp_path: Path)
     async with live_session(tmp_path, FIXTURES / "conversation.ogg") as conversation:
         movement = conversation.dependencies.movement_manager
         assert isinstance(movement, MagicMock)
-        await wait_for_content(
-            conversation,
-            lambda text: any(punctuation in conversation.reply_transcript for punctuation in ".!?"),
-        )
+        await wait_for_reply(conversation)
         assert conversation.backend_completions == 0
         movement.queue_move.assert_not_called()
         movement.clear_move_queue.assert_not_called()
@@ -157,10 +154,7 @@ async def test_spoken_request_cannot_use_disabled_motion(tmp_path: Path) -> None
     async with live_session(tmp_path, FIXTURES / "look_right.ogg") as conversation:
         movement = conversation.dependencies.movement_manager
         assert isinstance(movement, MagicMock)
-        await wait_for_content(
-            conversation,
-            lambda text: any(punctuation in conversation.reply_transcript for punctuation in ".!?"),
-        )
+        await wait_for_reply(conversation)
         assert conversation.backend_completions == 0
         movement.queue_move.assert_not_called()
     async with AsyncOpenAI(timeout=30) as client:

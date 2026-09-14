@@ -1,4 +1,5 @@
 import asyncio
+from time import monotonic
 from pathlib import Path
 from contextlib import asynccontextmanager
 from unittest.mock import MagicMock
@@ -39,10 +40,12 @@ class ObservedConversation(LiveConversation):
         self.hosted_searches = 0
         self.errors: list[str] = []
         self.played_samples = 0
+        self.last_transcript_at = 0.0
         self.finalized = False
 
     async def _handle_event(self, event: ServerEvent) -> None:
         if event.type == "session.output_transcript.delta":
+            self.last_transcript_at = monotonic()
             self.transcript += event.delta
             if self.input_transcript:
                 self.reply_transcript += event.delta
@@ -158,3 +161,17 @@ async def wait_for_content(conversation: ObservedConversation, predicate: Callab
         assert conversation.connected
         await asyncio.sleep(0.05)
     return conversation.transcript
+
+
+async def wait_for_reply(conversation: ObservedConversation) -> str:
+    """Wait for the spoken reply transcript to settle before assessing it."""
+    # Live has no turn-done event and continues audio, so evaluations observe transcript quiet.
+    while (
+        not conversation.reply_transcript.strip()
+        or conversation.played_samples == 0
+        or monotonic() - conversation.last_transcript_at < 3.0
+    ):
+        assert not conversation.errors
+        assert conversation.connected
+        await asyncio.sleep(0.05)
+    return conversation.reply_transcript

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from tests.live.session import FIXTURES, REACHY_SAMPLE_RATE, live_session, wait_for_content
+from tests.live.session import FIXTURES, REACHY_SAMPLE_RATE, live_session, wait_for_reply, wait_for_content
 from reachy_mini_conversation_app.memory import load_memory
 
 
@@ -16,10 +16,7 @@ pytestmark = [pytest.mark.live, pytest.mark.asyncio, pytest.mark.enable_socket]
 async def test_synthesized_speech_drives_production_audio_path(tmp_path: Path) -> None:
     """Receive audible speech while the microphone continues streaming silence."""
     async with live_session(tmp_path, FIXTURES / "hear_test.ogg") as conversation:
-        await wait_for_content(
-            conversation,
-            lambda text: any(punctuation in conversation.reply_transcript for punctuation in ".!?"),
-        )
+        await wait_for_reply(conversation)
         assert conversation.played_samples > REACHY_SAMPLE_RATE // 10
 
 
