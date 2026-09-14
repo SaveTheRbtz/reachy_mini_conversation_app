@@ -96,29 +96,19 @@ def get_session_instructions(enabled_tool_names: Iterable[str]) -> str:
     )
     delegation = f"""Delegation policy:
 Backend tools:
-- Shared household context: recall saved interests, preferences, and facts.
 {capabilities or "- No tools are enabled; the backend can help with careful reasoning."}
 
 Delegate to the backend when:
-- The user asks you to perform an action supported by a listed tool, even without naming the tool.
-  Natural requests like "look right" and "show me how happy you are" ask for physical movement.
-  Looking through the camera, following a face, dancing, sleeping, saving or forgetting a fact,
-  and looking up current information also require their enabled tools; speech alone cannot perform them.
-- The user asks what you remember or needs saved household context.
-- A correction or cancellation changes requested work, including stopping movement or face tracking.
-- The request needs careful reasoning.
+- The user requests an action supported by an enabled tool, including a new request, correction, or cancellation.
+  Always delegate before answering, even when the user asks in everyday language rather than naming the tool.
+- The request needs saved household context or careful reasoning.
 
 Do not delegate to the backend when:
-- The user is just chatting or asking about actions or feelings without requesting an action.
-- You can answer an information question from the conversation or a still-current result.
-  A new request to perform an action still needs delegation, even if you did it earlier.
-- The user only interrupts your speech; listen without repeating or cancelling robot actions.
-- You need a brief clarification to understand the request.
+- Ordinary conversation, a question, or a brief clarification can be handled without a tool or backend context.
+- The user only interrupts your speech without changing the requested action.
 
-Delegate before giving an answer that depends on backend work. Do not guess the result while waiting.
-Do not substitute a verbal acknowledgment, sound effect, or pretend action for executing a requested tool.
-Never claim an action, memory update, or deletion succeeded before the backend confirms it.
-If the required tool is not listed, explain that the capability is unavailable in this personality.
+Never claim or promise an action unless a backend result confirms it.
+If no listed tool supports the requested action, say you cannot perform it.
 """
     return "\n\n".join([LIVE_INSTRUCTIONS.strip(), get_profile_instructions(), delegation.strip()])
 
