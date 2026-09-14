@@ -3,10 +3,11 @@ import random
 import asyncio
 import logging
 import unicodedata
-from typing import Final
+from typing import Final, Annotated
 from concurrent.futures import Future, ThreadPoolExecutor
 
 from agents import FunctionTool, RunContextWrapper, function_tool
+from pydantic import Field
 
 from reachy_mini.motion.recorded_move import RecordedMoves
 from reachy_mini_conversation_app.tools.types import ToolResult, ToolDependencies
@@ -14,51 +15,6 @@ from reachy_mini_conversation_app.dance_emotion_moves import EmotionQueueMove
 
 
 logger = logging.getLogger(__name__)
-
-EMOTION_INTENTS: Final = (
-    "random",
-    "happy",
-    "excited",
-    "loving",
-    "grateful",
-    "success",
-    "thinking",
-    "attentive",
-    "confused",
-    "uncertain",
-    "sad",
-    "downcast",
-    "lonely",
-    "angry",
-    "irritated",
-    "displeased",
-    "disgusted",
-    "scared",
-    "anxious",
-    "surprised",
-    "amazed",
-    "calming",
-    "relief",
-    "impatient",
-    "embarrassed",
-    "bored",
-    "tired",
-    "sleepy",
-    "yes",
-    "yes_understanding",
-    "no",
-    "no_sad",
-    "no_excited",
-    "no_firm",
-    "welcoming",
-    "greeting",
-    "goodbye",
-    "go_away",
-    "helpful",
-    "dance",
-    "electric",
-    "dying",
-)
 
 _EXCELLENT_MOVES: tuple[str, ...] = (
     "anxiety1",
@@ -159,6 +115,8 @@ _INTENT_TO_MOVES: dict[str, tuple[str, ...]] = {
     "dying": ("dying1",),
 }
 
+EMOTION_INTENTS: Final = ("random", *_INTENT_TO_MOVES)
+
 _ALLOWED_MOVE_NAMES: frozenset[str] = frozenset(_CURATED_DEFAULT_MOVES).union(*_INTENT_TO_MOVES.values())
 
 _KEYWORD_INTENTS: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -234,11 +192,20 @@ def _log_load_failure(loaded: asyncio.Future[RecordedMoves]) -> None:
 
 @function_tool(
     name_override="play_emotion",
-    description_override="Play a robot emotion matching a compact emotional intent.",
+    description_override=(
+        "Physically express an emotion or gesture with the robot, including requests to show how you feel."
+    ),
 )
 async def play_emotion_tool(
     context: RunContextWrapper[ToolDependencies],
-    emotion: str = "random",
+    emotion: Annotated[
+        str,
+        Field(
+            description="Translate the user's request into one of these English emotion values: "
+            + ", ".join(EMOTION_INTENTS)
+            + ". Use random only when the user requests an unspecified emotion."
+        ),
+    ] = "random",
 ) -> ToolResult:
     """Queue a curated recorded emotion."""
     global _recorded_moves
@@ -252,9 +219,16 @@ async def play_emotion_tool(
         emotion_names = recorded_moves.list_moves()
         if not emotion_names:
             return {"error": "No emotions are available"}
-        emotion_name = resolve_emotion_name(emotion, emotion_names)
+        emotion_name = (
+            random_curated_emotion(emotion_names)
+            if _normalize_emotion_key(emotion) == "random"
+            else resolve_emotion_name(emotion, emotion_names)
+        )
         if emotion_name is None:
-            emotion_name = random_curated_emotion(emotion_names)
+            logger.warning("No matching recorded emotion for %r", emotion)
+            return {
+                "error": f"No matching recorded emotion for {emotion!r}. Choose from: {', '.join(EMOTION_INTENTS)}"
+            }
         context.context.movement_manager.queue_move(EmotionQueueMove(emotion_name, recorded_moves))
         return {"status": "queued", "emotion": emotion_name}
     except Exception as error:

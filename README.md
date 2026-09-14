@@ -51,6 +51,10 @@ Open [localhost:7860](http://127.0.0.1:7860/) and start talking.
 - **Personalities:** choose or create a personality and set its tool access.
 - **Settings:** choose a voice, set the startup personality, or enter an API key.
 
+Ask naturally for actions such as looking right, showing happiness, or following your face.
+These requests use the active personality's enabled tools. Reachy reports when a capability
+is unavailable or an action fails.
+
 Changing the active personality or voice starts a fresh conversation. Reachy sleeps
 and the app stops after 15 minutes without conversation; set `REACHY_MINI_APP_TIMEOUT_MINUTES=0`
 in `.env` to disable this.

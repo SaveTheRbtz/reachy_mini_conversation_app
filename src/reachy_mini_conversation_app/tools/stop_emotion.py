@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 @function_tool(
     name_override="stop_emotion",
-    description_override="Stop the current robot emotion and clear queued movement.",
+    description_override="Stop the robot's emotion or other body movements.",
 )
 async def stop_emotion_tool(context: RunContextWrapper[ToolDependencies]) -> ToolResult:
     """Stop the current emotion."""

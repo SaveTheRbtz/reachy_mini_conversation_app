@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 @function_tool(
     name_override="dance",
-    description_override="Queue a named dance, or a random available dance when no name is supplied.",
+    description_override="Dance using a named move, or a random available dance when no name is supplied.",
 )
 async def dance_tool(
     context: RunContextWrapper[ToolDependencies],
