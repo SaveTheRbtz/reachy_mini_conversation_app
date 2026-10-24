@@ -10,7 +10,7 @@ from dotenv import find_dotenv, load_dotenv
 logger = logging.getLogger(__name__)
 
 LIVE_MODEL: Final = "gpt-live-1"
-DELEGATION_MODEL: Final = "gpt-6-astra"
+DELEGATION_MODEL: Final = "gpt-6.1-sol"
 OPENAI_API_KEY_ENV: Final = "OPENAI_API_KEY"
 OPENAI_VOICE_ENV: Final = "OPENAI_VOICE"
 APP_TIMEOUT_MINUTES_ENV: Final = "REACHY_MINI_APP_TIMEOUT_MINUTES"
